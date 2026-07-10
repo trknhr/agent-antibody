@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+          python-version: "3.14.5"
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --locked --dev
+
+      - name: Check formatting
+        run: uv run --locked ruff format --check .
+
+      - name: Lint
+        run: uv run --locked ruff check .
+
+      - name: Type check
+        run: uv run --locked pyright
+
+      - name: Test
+        run: uv run --locked pytest
+
+      - name: Execute generated antibody regression
+        run: |
+          uv run --locked agent-antibody demo --output .generated-antibodies
+          uv run --locked agent-antibody regression .generated-antibodies/*.yaml
+
+      - name: Build package
+        run: uv build

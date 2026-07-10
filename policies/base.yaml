@@ -1,0 +1,7 @@
+version: 1
+default_action: allow
+rules: []
+untrusted_sources:
+  - runbook_content
+  - issue_body
+  - log_content

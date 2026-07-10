@@ -1,0 +1,14 @@
+.gcloudignore
+.git
+.github
+.env
+.venv
+.pytest_cache
+.ruff_cache
+.generated-antibodies
+dist
+build
+tests
+gha-creds-*.json
+__pycache__
+*.pyc

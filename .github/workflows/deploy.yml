@@ -1,0 +1,164 @@
+name: Deploy Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-antibody-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+          python-version: "3.14.5"
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --locked --dev
+
+      - name: Static checks
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pyright
+
+      - name: Tests
+        run: uv run --locked pytest
+
+      - name: Generated antibody regression
+        run: |
+          uv run --locked agent-antibody demo --output .generated-antibodies
+          uv run --locked agent-antibody regression .generated-antibodies/*.yaml
+
+      - name: Build package
+        run: uv build
+
+  deploy:
+    needs: verify
+    if: >-
+      github.repository == 'trknhr/agent-antibody' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ steps.service.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Authenticate with Workload Identity Federation
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Deploy source to Cloud Run
+        id: source_deploy
+        continue-on-error: true
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          region: ${{ vars.GCP_REGION }}
+          service: ${{ vars.CLOUD_RUN_SERVICE }}
+          source: .
+          gcloud_version: "573.0.0"
+          env_vars_update_strategy: overwrite
+          env_vars: |-
+            GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }}
+            GOOGLE_CLOUD_LOCATION=global
+            GOOGLE_GENAI_USE_VERTEXAI=true
+            AGENT_ANTIBODY_MODEL=${{ vars.AGENT_ANTIBODY_MODEL }}
+            AGENT_ANTIBODY_LIVE_ENABLED=true
+            AGENT_ANTIBODY_LIVE_CACHE_SECONDS=600
+            AGENT_ANTIBODY_ATTACK_SUITE_ATTEMPTS=3
+            AGENT_ANTIBODY_EXPORT_TRACES=true
+          labels: |-
+            component=agent-antibody
+            environment=production
+          flags: >-
+            --service-account=${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+            --build-service-account=projects/${{ vars.GCP_PROJECT_ID }}/serviceAccounts/${{ vars.GCP_BUILD_SERVICE_ACCOUNT }}
+            --max-instances=1
+            --min-instances=0
+            --concurrency=1
+            --cpu=1
+            --memory=1Gi
+            --timeout=300
+            --ingress=all
+
+      - name: Deploy latest built image after source deploy API failure
+        if: steps.source_deploy.outcome == 'failure'
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+          RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          MODEL: ${{ vars.AGENT_ANTIBODY_MODEL }}
+        run: |
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/$SERVICE:latest"
+          gcloud run deploy "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SERVICE_ACCOUNT" \
+            --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,GOOGLE_GENAI_USE_VERTEXAI=true,AGENT_ANTIBODY_MODEL=$MODEL,AGENT_ANTIBODY_LIVE_ENABLED=true,AGENT_ANTIBODY_LIVE_CACHE_SECONDS=600,AGENT_ANTIBODY_ATTACK_SUITE_ATTEMPTS=3,AGENT_ANTIBODY_EXPORT_TRACES=true" \
+            --ingress=all \
+            --min=0 \
+            --max=1 \
+            --concurrency=1 \
+            --timeout=300 \
+            --cpu=1 \
+            --memory=1Gi \
+            --quiet
+
+      - name: Resolve Cloud Run service URL
+        id: service
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+        run: |
+          URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.url }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 2 \
+            "$SERVICE_URL/api/healthz" | jq -e '.status == "ok"'
+
+          curl --fail-with-body --silent --show-error \
+            "$SERVICE_URL/api/demo" | jq -e '
+              .vulnerable.oracle.status == "INFECTED" and
+              .protected.oracle.status == "IMMUNE" and
+              .normal.oracle.status == "HEALTHY"
+            '
+
+          curl --fail-with-body --silent --show-error \
+            "$SERVICE_URL/api/live/status" | jq -e '.enabled == true'

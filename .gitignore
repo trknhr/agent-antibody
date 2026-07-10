@@ -1,0 +1,14 @@
+.DS_Store
+.env
+gha-creds-*.json
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.generated-antibodies/
+htmlcov/
+__pycache__/
+*.py[cod]
+dist/
+build/
+*.egg-info/

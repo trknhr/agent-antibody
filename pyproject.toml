@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-antibody"
+version = "0.1.0"
+description = "Security CI that turns successful AI-agent attacks into policy and regression tests."
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "google-adk>=2.4,<3",
+  "pydantic>=2.11,<3",
+  "pyyaml>=6.0.2,<7",
+  "uvicorn>=0.35,<1",
+]
+
+[project.scripts]
+agent-antibody = "agent_antibody.cli:main"
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28,<1",
+  "pyright>=1.1.411,<2",
+  "pytest>=9.1,<10",
+  "pytest-cov>=7,<8",
+  "ruff>=0.15.21,<0.16",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_antibody"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.14"
+pythonPlatform = "Linux"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+
+[tool.coverage.run]
+branch = true
+source = ["agent_antibody"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
