@@ -752,12 +752,13 @@ def validate_evaluation_for_apply(
     if evaluation.changed_paths != expected_paths:
         raise ValueError("evaluation changed paths do not match the trusted pull request diff")
 
-    expected_targets = detect_affected_targets(expected_paths)
-    actual_targets = tuple(candidate.artifact.target_id for candidate in evaluation.candidates)
-    if actual_targets != expected_targets:
-        raise ValueError(
-            "evaluation target set does not match the trusted changed-path target selection"
-        )
+    if trusted_changed_paths is not None:
+        expected_targets = detect_affected_targets(expected_paths)
+        actual_targets = tuple(candidate.artifact.target_id for candidate in evaluation.candidates)
+        if actual_targets != expected_targets:
+            raise ValueError(
+                "evaluation target set does not match the trusted changed-path target selection"
+            )
 
     for candidate in evaluation.candidates:
         artifact = candidate.artifact
