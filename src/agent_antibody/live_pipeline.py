@@ -69,7 +69,7 @@ class LiveSecurityPipeline:
         antibody_agent: AntibodyPlanner | None = None,
         compiler: PolicyCompiler | None = None,
         target_timeout_seconds: float = 45.0,
-        target_max_llm_calls: int = 10,
+        target_max_llm_calls: int = 12,
         attack_suite_attempts: int = 2,
         suite_concurrency: int = 3,
         target_agent_factory: Callable[[], TargetAgent] | None = None,

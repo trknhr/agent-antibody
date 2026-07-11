@@ -35,6 +35,8 @@ or access to a real service control plane.
 - Ten-case attack campaigns: Gemini generates ten distinct injection techniques,
   uses one confirmed case as immune memory, and verifies the resulting antibody
   against that seed plus nine held-out variants.
+- Target-owned attack payload contracts, so generated tool arguments are checked
+  against the exact untrusted document grammar each vulnerable adapter consumes.
 - FastAPI demo UI with deterministic and live Gemini flows.
 - Cloud Run source deployment workflow with Workload Identity Federation.
 

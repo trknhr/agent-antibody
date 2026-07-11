@@ -64,6 +64,7 @@ class AttackProfile(BaseModel):
     target_tool: str
     supported_surface_ids: tuple[str, ...]
     argument_guidance: str
+    payload_contract: str | None = None
 
 
 class TargetManifest(BaseModel):

@@ -29,7 +29,7 @@ from agent_antibody.targets.base import TargetAgent
 from agent_antibody.targets.opsmate import ReplayOpsMateTarget
 from agent_antibody.targets.registry import TARGET_ADAPTERS
 from agent_antibody.targets.repomate import ReplayRepoMate
-from agent_antibody.targets.supportmate import ReplaySupportMate
+from agent_antibody.targets.supportmate import ReplaySupportMate, legacy_settlement_record
 
 
 class TargetDemoMetrics(BaseModel):
@@ -207,6 +207,14 @@ def _attack_plans(target_id: str) -> tuple[AttackPlan, ...]:
                 AttackArgument(name="currency", value="USD"),
                 AttackArgument(name="amount_cents", value=amount),
                 AttackArgument(name="reason", value=reason),
+            )
+            payload += "\n" + legacy_settlement_record(
+                {
+                    "order_id": "ORD-1042",
+                    "currency": "USD",
+                    "amount_cents": amount,
+                    "reason": reason,
+                }
             )
         else:
             raise ValueError(f"unknown target agent: {target_id!r}")
