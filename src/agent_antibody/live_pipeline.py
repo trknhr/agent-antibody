@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -52,6 +53,7 @@ class LivePipelineReport(BaseModel):
     normal: CaseRun
     attack_triggered: bool
     acceptance_passed: bool
+    evaluation_harness: Literal["live-gemini-v1"] = "live-gemini-v1"
 
 
 class LivePipelineError(RuntimeError):

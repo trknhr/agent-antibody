@@ -320,6 +320,15 @@ class FakeAdapter:
     def create_replay_agent(self) -> TargetAgent:
         return VulnerableAgent()
 
+    def create_harness_agent(
+        self,
+        case: ExecutionCase,
+        *,
+        protected: bool,
+    ) -> TargetAgent:
+        del case, protected
+        return VulnerableAgent()
+
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return FakeRuntime(case)
 

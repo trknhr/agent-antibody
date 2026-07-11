@@ -10,6 +10,10 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: antibody-remediate-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
+  cancel-in-progress: false
+
 jobs:
   create-immunity-pr:
     if: >-
@@ -33,6 +37,7 @@ jobs:
           HEAD_SHA="$(jq -r '.head.sha' "$RUNNER_TEMP/source-pr.json")"
           HEAD_REF="$(jq -r '.head.ref' "$RUNNER_TEMP/source-pr.json")"
           HEAD_REPOSITORY="$(jq -r '.head.repo.full_name // empty' "$RUNNER_TEMP/source-pr.json")"
+          BASE_SHA="$(jq -r '.base.sha' "$RUNNER_TEMP/source-pr.json")"
           if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_SHA" != "$WORKFLOW_HEAD_SHA" ]; then
             echo "eligible=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -42,8 +47,12 @@ jobs:
             exit 0
           fi
           git check-ref-format --branch "$HEAD_REF" >/dev/null
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' \
+            | LC_ALL=C sort -u > "$RUNNER_TEMP/trusted-changed-files.txt"
           echo "eligible=true" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
 
@@ -62,6 +71,7 @@ jobs:
           ref: ${{ steps.source.outputs.head_sha }}
           path: candidate
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Download data-only candidate evaluation
         if: steps.source.outputs.eligible == 'true'
@@ -91,6 +101,19 @@ jobs:
           python-version: "3.14.5"
           enable-cache: true
 
+      - name: Audit source pull request immutable memory
+        if: steps.source.outputs.eligible == 'true'
+        env:
+          BASE_SHA: ${{ steps.source.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+        working-directory: control-plane
+        run: |
+          uv sync --locked --dev
+          uv run --locked agent-antibody immunity audit \
+            --repository-root "$GITHUB_WORKSPACE/candidate" \
+            --base-revision "$BASE_SHA" \
+            --head-revision "$HEAD_SHA"
+
       - name: Apply only validated immunity files
         if: steps.source.outputs.eligible == 'true'
         env:
@@ -109,7 +132,9 @@ jobs:
             --source-pr-number "$PR_NUMBER" \
             --source-pr-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR_NUMBER" \
             --remediation-branch "$BRANCH" \
-            --workflow-run-url "$RUN_URL"
+            --workflow-run-url "$RUN_URL" \
+            --trusted-source-revision "$HEAD_SHA" \
+            --trusted-changed-files "$RUNNER_TEMP/trusted-changed-files.txt"
 
       - name: Create stacked immunity pull request
         id: create_immunity_pr
@@ -121,6 +146,18 @@ jobs:
           HEAD_REF: ${{ steps.source.outputs.head_ref }}
         run: |
           BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
+          BRANCH_EXISTS="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/$BRANCH" | jq --arg branch "refs/heads/$BRANCH" '[.[] | select(.ref == $branch)] | length')"
+          if [ "$BRANCH_EXISTS" != "0" ]; then
+            echo "A remediation branch already exists; leaving it untouched."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          EXISTING_PR="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state all --json url --jq '.[0].url // empty')"
+          if [ -n "$EXISTING_PR" ]; then
+            echo "A remediation pull request already exists; leaving it untouched."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           cd candidate
           git switch --create "$BRANCH"
           git add -- immunities/v1
@@ -136,6 +173,11 @@ jobs:
           git -c core.hooksPath=/dev/null config user.name "agent-antibody[bot]"
           git -c core.hooksPath=/dev/null config user.email "agent-antibody[bot]@users.noreply.github.com"
           git -c core.hooksPath=/dev/null commit -m "chore(immunity): add generated regression memory"
+          CURRENT_HEAD_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          if [ "$CURRENT_HEAD_SHA" != "$HEAD_SHA" ]; then
+            echo "Source pull request head changed while remediation was prepared; aborting." >&2
+            exit 1
+          fi
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin "HEAD:refs/heads/$BRANCH"
           PR_URL="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --base "$HEAD_REF" --state open --json url --jq '.[0].url')"
@@ -168,10 +210,17 @@ jobs:
             --remediation-branch "$BRANCH" \
             --remediation-pr-url "$PR_URL" \
             --workflow-run-url "$RUN_URL" \
+            --trusted-source-revision "$HEAD_SHA" \
+            --trusted-changed-files "$RUNNER_TEMP/trusted-changed-files.txt" \
             --refresh-snapshot
           cd "$GITHUB_WORKSPACE/candidate"
           git add -- immunities/v1/snapshot.json
           if ! git diff --cached --quiet; then
             git -c core.hooksPath=/dev/null commit -m "chore(immunity): link generated pull request"
+            CURRENT_HEAD_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+            if [ "$CURRENT_HEAD_SHA" != "$HEAD_SHA" ]; then
+              echo "Source pull request head changed while snapshot linkage was prepared; aborting." >&2
+              exit 1
+            fi
             git push origin "HEAD:refs/heads/$BRANCH"
           fi

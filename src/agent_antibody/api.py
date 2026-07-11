@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
@@ -15,7 +14,7 @@ from agent_antibody.attack_campaign import AttackCaseResult
 from agent_antibody.contracts import TraceEvent
 from agent_antibody.core_types import JsonObject, JsonValue
 from agent_antibody.generic_runner import CaseRun
-from agent_antibody.immunity_artifacts import load_snapshot
+from agent_antibody.immunity_artifacts import verify_snapshot
 from agent_antibody.live_pipeline import LivePipelineError, LivePipelineReport
 from agent_antibody.live_service import LiveDemoBusyError, LiveDemoState, live_demo_service
 from agent_antibody.portfolio_demo import TargetDemoReport, run_target_demo
@@ -23,11 +22,6 @@ from agent_antibody.targets.registry import TARGET_ADAPTERS
 
 app = FastAPI(title="Agent Antibody", version="0.1.0")
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-
-_PUBLIC_SECRET_PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key|password|token)\s*[=:]\s*\S+"),
-    re.compile(r"\b(?:sk|AIza)[-_A-Za-z0-9]{12,}\b"),
-)
 
 
 class LiveDemoRequest(BaseModel):
@@ -70,17 +64,11 @@ def _public_attack_plan(plan: JsonObject) -> JsonObject:
             "plan_id",
             "target_id",
             "surface_id",
-            "payload",
             "expected_tool",
             "technique",
         )
         if key in plan
     }
-    payload = public_plan.get("payload")
-    if isinstance(payload, str):
-        for pattern in _PUBLIC_SECRET_PATTERNS:
-            payload = pattern.sub("[REDACTED]", payload)
-        public_plan["payload"] = payload
     return public_plan
 
 
@@ -263,7 +251,7 @@ def immunity_snapshot() -> JsonObject:
     """Read the committed CI artifact; never generate or expose a live run here."""
 
     try:
-        snapshot = load_snapshot(repository_root=_REPOSITORY_ROOT)
+        snapshot = verify_snapshot(repository_root=_REPOSITORY_ROOT)
     except FileNotFoundError as error:
         raise HTTPException(
             status_code=503, detail="immunity snapshot has not been generated"

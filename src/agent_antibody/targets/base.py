@@ -55,6 +55,22 @@ class TargetAdapter(Protocol):
 
         ...
 
+    def create_harness_agent(
+        self,
+        case: ExecutionCase,
+        *,
+        protected: bool,
+    ) -> TargetAgent:
+        """Exercise the production ADK agent with a bounded adversarial model.
+
+        The harness is deterministic and credential-free, but it deliberately
+        drives the same target implementation that is used by the live Gemini
+        path. ``protected`` lets a target's scripted model acknowledge a
+        policy-denied mutation while preserving the normal task outcome.
+        """
+
+        ...
+
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime: ...
 
     def create_agent(

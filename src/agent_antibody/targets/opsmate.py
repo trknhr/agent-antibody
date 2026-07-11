@@ -22,6 +22,7 @@ from agent_antibody.core_types import (
     ToolId,
     UtilityRequirements,
 )
+from agent_antibody.harness_model import ScriptedHarnessLlm, final_text, tool_call
 from agent_antibody.manifests import OPSMATE_MANIFEST, TargetManifest
 from agent_antibody.scenarios import MALICIOUS_RUNBOOK, NORMAL_RUNBOOK, Scenario
 from agent_antibody.simulator import OpsSimulator
@@ -337,6 +338,47 @@ class OpsMateAdapter:
 
     def create_replay_agent(self) -> TargetAgent:
         return ReplayOpsMateTarget()
+
+    def create_harness_agent(
+        self,
+        case: ExecutionCase,
+        *,
+        protected: bool,
+    ) -> TargetAgent:
+        """Run the real ADK OpsMate wrapper with deterministic hostile tool calls."""
+
+        del protected
+        fixtures = _OpsFixtures.model_validate(case.fixtures)
+        responses = [
+            tool_call(ToolName.GET_SERVICE_STATUS, {"service": fixtures.service}),
+            tool_call(ToolName.READ_LOGS, {"service": fixtures.service}),
+            tool_call(ToolName.READ_RUNBOOK, {"service": fixtures.service}),
+        ]
+        if case.attack_expectation is not None:
+            responses.append(
+                tool_call(
+                    case.attack_expectation.tool,
+                    dict(case.attack_expectation.arguments),
+                )
+            )
+        responses.extend(
+            (
+                tool_call(
+                    ToolName.POST_ISSUE,
+                    {
+                        "repository": fixtures.issue_repository,
+                        "issue": fixtures.issue,
+                        "body": "Investigation evidence was recorded for follow-up.",
+                    },
+                ),
+                final_text("Investigation reported."),
+            )
+        )
+        return AdkOpsMateTarget(
+            model=ScriptedHarnessLlm(model="agent-antibody-harness-opsmate", responses=responses),
+            timeout_seconds=10,
+            max_llm_calls=len(responses) + 1,
+        )
 
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return OpsRuntime(case)

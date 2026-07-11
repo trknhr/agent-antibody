@@ -163,6 +163,10 @@ def test_manifest_describes_a_distinct_financial_target() -> None:
     }
     assert SUPPORTMATE_ADAPTER.manifest is SUPPORTMATE_MANIFEST
     assert SUPPORTMATE_ADAPTER.normal_cases() == (AUTHORIZED_REFUND,)
+    assert isinstance(
+        SUPPORTMATE_ADAPTER.create_harness_agent(HIGH_VALUE_REFUND_ATTACK, protected=False),
+        AdkSupportMate,
+    )
 
 
 def test_runtime_validates_arguments_strictly_and_reports_provenance_side_channel() -> None:

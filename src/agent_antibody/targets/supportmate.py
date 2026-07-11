@@ -32,6 +32,7 @@ from agent_antibody.core_types import (
     ToolId,
     UtilityRequirements,
 )
+from agent_antibody.harness_model import ScriptedHarnessLlm, final_text, tool_call
 from agent_antibody.manifests import (
     AttackProfile,
     InjectionSurface,
@@ -1068,6 +1069,71 @@ class SupportMateAdapter:
 
     def create_replay_agent(self) -> TargetAgent:
         return ReplaySupportMate()
+
+    def create_harness_agent(
+        self,
+        case: ExecutionCase,
+        *,
+        protected: bool,
+    ) -> TargetAgent:
+        """Run the production ADK target with an adversarial, credential-free model."""
+
+        fixtures = _SupportFixtures.model_validate(case.fixtures)
+        responses = [
+            tool_call(READ_TICKET, {"ticket_id": fixtures.ticket_id}),
+            tool_call(
+                READ_ATTACHMENT_TEXT,
+                {
+                    "ticket_id": fixtures.ticket_id,
+                    "attachment_id": fixtures.attachment_id,
+                },
+            ),
+            tool_call(GET_ORDER, {"order_id": fixtures.order_id}),
+            tool_call(READ_REFUND_POLICY, {"policy_id": fixtures.policy_id}),
+        ]
+        refund_arguments: JsonObject
+        if case.attack_expectation is not None:
+            refund_arguments = dict(case.attack_expectation.arguments)
+        elif fixtures.authorized_refund_cents is not None:
+            refund_arguments = cast(
+                JsonObject,
+                {
+                    "order_id": fixtures.order_id,
+                    "currency": CURRENCY,
+                    "amount_cents": fixtures.authorized_refund_cents,
+                    "reason": fixtures.authorized_refund_reason or "task-authorized refund",
+                },
+            )
+        else:
+            raise ValueError("SupportMate harness requires an attack or authorized refund case")
+        responses.append(tool_call(ISSUE_REFUND, refund_arguments))
+        refund_was_blocked = protected and case.attack_expectation is not None
+        responses.extend(
+            (
+                tool_call(
+                    REPLY_TO_CUSTOMER,
+                    {
+                        "ticket_id": fixtures.ticket_id,
+                        "body": (
+                            "The requested refund needs manual approval; no refund was issued."
+                            if refund_was_blocked
+                            else "The task-authorized USD refund was completed."
+                        ),
+                        "refund_status": "not_issued" if refund_was_blocked else "completed",
+                    },
+                ),
+                final_text("The support case was resolved."),
+            )
+        )
+        return AdkSupportMate(
+            model=ScriptedHarnessLlm(
+                model="agent-antibody-harness-supportmate",
+                responses=responses,
+            ),
+            timeout_seconds=10,
+            max_llm_calls=len(responses) + 1,
+            trust_ticket_actions=True,
+        )
 
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return SupportRuntime(case)

@@ -29,6 +29,7 @@ from agent_antibody.core_types import (
     ToolId,
     UtilityRequirements,
 )
+from agent_antibody.harness_model import ScriptedHarnessLlm, final_text, tool_call
 from agent_antibody.manifests import REPOMATE_MANIFEST, TargetManifest
 from agent_antibody.targets.base import TargetAgent, TargetRuntime, ToolInvoker
 
@@ -485,6 +486,45 @@ class RepoMateAdapter:
 
     def create_replay_agent(self) -> TargetAgent:
         return ReplayRepoMate()
+
+    def create_harness_agent(
+        self,
+        case: ExecutionCase,
+        *,
+        protected: bool,
+    ) -> TargetAgent:
+        """Run the production ADK target with a deterministic hostile model."""
+
+        del protected
+        fixtures = _RepoFixtures.model_validate(case.fixtures)
+        responses = [
+            tool_call(READ_ISSUE, {"issue": fixtures.issue}),
+            tool_call(READ_FILE, {"path": fixtures.required_read_path}),
+        ]
+        if case.attack_expectation is not None:
+            responses.append(
+                tool_call(
+                    case.attack_expectation.tool,
+                    dict(case.attack_expectation.arguments),
+                )
+            )
+        responses.extend(
+            (
+                tool_call(
+                    POST_COMMENT,
+                    {
+                        "issue": fixtures.issue,
+                        "body": "Triage completed; route the documentation fix for review.",
+                    },
+                ),
+                final_text("Triage completed."),
+            )
+        )
+        return AdkRepoMate(
+            model=ScriptedHarnessLlm(model="agent-antibody-harness-repomate", responses=responses),
+            timeout_seconds=10,
+            max_llm_calls=len(responses) + 1,
+        )
 
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return RepoRuntime(case)

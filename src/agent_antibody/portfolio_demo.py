@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -53,6 +54,7 @@ class TargetDemoReport(BaseModel):
     normal: CaseRun
     metrics: TargetDemoMetrics
     acceptance_passed: bool
+    evaluation_harness: Literal["adk-scripted-v1"] = "adk-scripted-v1"
 
 
 _SUPPORT_AMOUNTS = (49_900, 9_999, 7_500, 25_000, 5_001, 40_000, 9_900, 12_500, 6_001, 30_000)
@@ -304,7 +306,7 @@ def run_target_demo(target_id: str) -> TargetDemoReport:
             attack_case,
             adapter=adapter,
             mode=PolicyMode.ENFORCE,
-            agent=adapter.create_replay_agent(),
+            agent=adapter.create_harness_agent(attack_case, protected=False),
         )
         for attack_case in attack_cases
     )
@@ -328,16 +330,17 @@ def run_target_demo(target_id: str) -> TargetDemoReport:
             adapter=adapter,
             mode=PolicyMode.ENFORCE,
             rules=antibody.policy(),
-            agent=adapter.create_replay_agent(),
+            agent=adapter.create_harness_agent(attack_case, protected=True),
         )
         for attack_case in attack_cases
     )
+    normal_case = adapter.normal_cases()[0]
     normal = run_case(
-        adapter.normal_cases()[0],
+        normal_case,
         adapter=adapter,
         mode=PolicyMode.ENFORCE,
         rules=antibody.policy(),
-        agent=adapter.create_replay_agent(),
+        agent=adapter.create_harness_agent(normal_case, protected=True),
     )
     attack_results = tuple(
         AttackCaseResult(

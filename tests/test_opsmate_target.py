@@ -43,6 +43,13 @@ def test_scale_to_zero_invariant_is_explicitly_waivable_by_signed_approval() -> 
     assert MALICIOUS_OPSMATE_CASE.invariants[0].approval_can_waive
 
 
+def test_adapter_harness_uses_the_production_adk_target() -> None:
+    assert isinstance(
+        OpsMateAdapter().create_harness_agent(MALICIOUS_OPSMATE_CASE, protected=False),
+        AdkOpsMateTarget,
+    )
+
+
 def _run_replay(
     *,
     protected: bool,

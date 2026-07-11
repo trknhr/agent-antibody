@@ -3,25 +3,9 @@ name: Agent Antibody Candidate
 on:
   pull_request:
     paths:
-      - "src/agent_antibody/targets/**"
-      - "src/agent_antibody/adk_adapter.py"
-      - "src/agent_antibody/agent.py"
-      - "src/agent_antibody/ai_agents.py"
-      - "src/agent_antibody/ai_models.py"
-      - "src/agent_antibody/attack_campaign.py"
-      - "src/agent_antibody/contracts.py"
-      - "src/agent_antibody/core_types.py"
-      - "src/agent_antibody/gateway.py"
-      - "src/agent_antibody/generic_*.py"
-      - "src/agent_antibody/manifests.py"
-      - "src/agent_antibody/oracle.py"
-      - "src/agent_antibody/policy*.py"
-      - "src/agent_antibody/runner.py"
-      - "src/agent_antibody/scenarios.py"
-      - "src/agent_antibody/signing.py"
-      - "src/agent_antibody/simulator.py"
-      - "src/agent_antibody/tools.py"
-      - "src/agent_antibody/trace.py"
+      - "src/agent_antibody/**"
+      - "pyproject.toml"
+      - "uv.lock"
       - "policies/**"
       - "scenarios/**"
   workflow_dispatch:
@@ -57,6 +41,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -72,9 +57,10 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files.txt"
+            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" \
+              | LC_ALL=C sort -u > "$RUNNER_TEMP/changed-files.txt"
           else
-            git ls-files src/agent_antibody > "$RUNNER_TEMP/changed-files.txt"
+            git ls-files src/agent_antibody | LC_ALL=C sort -u > "$RUNNER_TEMP/changed-files.txt"
           fi
 
       - name: Evaluate candidate with read-only credentials

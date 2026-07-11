@@ -298,3 +298,7 @@ def test_adapter_exposes_normal_cases_runtime_and_live_agent_factory() -> None:
         adapter.create_agent(model="gemini-test", timeout_seconds=5, max_llm_calls=3),
         AdkRepoMate,
     )
+    assert isinstance(
+        adapter.create_harness_agent(MALICIOUS_REPOMATE_CASE, protected=False),
+        AdkRepoMate,
+    )

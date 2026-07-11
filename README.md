@@ -42,25 +42,28 @@ or access to a real service control plane.
 - A two-stage GitHub workflow that detects agent changes, produces data-only
   candidate evidence, and opens a stacked draft immunity PR for same-repository
   pull requests.
-- FastAPI demo UI with deterministic and live Gemini flows.
+- Read-only FastAPI dashboard for the currently committed immunity state.
 - Cloud Run source deployment workflow with Workload Identity Federation.
 
 ## Architecture
 
 ```text
 Target registry (OpsMate / RepoMate / SupportMate)
-  -> Gemini Attack Agent
   -> target-specific attack materializer
-Target Agent through Google ADK
+Candidate target through production Google ADK wrapper
+  -> deterministic, credential-free adversarial model fixture
   -> Policy Gateway
   -> target simulator
   -> canonical trace
 Deterministic oracle
   -> confirmed failure
-Gemini Antibody Agent
-  -> bounded policy proposal
 Policy compiler
   -> deterministic antibody policy + regression memory
+Committed immunity artifact
+  -> persisted-policy runtime integration
+
+Live Gemini Attack Agent + Antibody Agent
+  -> separate Cloud Run release gate
 ```
 
 Untrusted documents cannot create contracts or approvals. The gateway derives
@@ -91,7 +94,9 @@ uv run agent-antibody regression .generated-antibodies/*.yaml
 
 ## Live Gemini Pipeline
 
-The deterministic demo does not need an API key. The live path uses real Gemini
+The ADK enforcement harness does not need an API key. It executes the same
+target ADK wrappers with a bounded adversarial model fixture, so policy and tool
+gateway regressions are repeatable in CI. The live path uses real Gemini
 calls for three roles: Attack Agent, the selected target through ADK, and
 Antibody Agent. Each campaign generates and evaluates ten target-specific attacks
 before and after the generated policy. All tools still execute only against the
@@ -132,9 +137,10 @@ uv run uvicorn agent_antibody.api:app --reload
 
 Open `http://127.0.0.1:8000`.
 
-The page at `/` is a read-only CI immunity dashboard. It reads the committed
-allowlisted snapshot at `immunities/v1/snapshot.json`; it cannot call a model,
-run a tool, change policy, or create a GitHub PR from a browser.
+The page at `/` is a read-only CI immunity dashboard. It reads a verified,
+allowlisted projection of `immunities/v1/`; it cannot call a model, run a tool,
+change policy, or create a GitHub PR from a browser. The API refuses a snapshot
+that cannot be rebuilt from the immutable artifacts.
 
 The API exposes:
 
@@ -163,11 +169,27 @@ Each confirmed attack becomes an additive, content-addressed file:
 immunities/v1/<target_id>/imm-<content-digest>.yaml
 ```
 
-The file contains the bounded policy DSL and ten replayable attacks, but omits
-agent replies, tool output, raw simulator state, contracts, and LLM rationale.
-`agent-antibody immunity verify --repository-root .` replays every persisted
-memory against the current target adapter and verifies that all ten attacks are
-blocked by a policy rule while normal utility remains healthy.
+The file contains a bounded policy DSL, harness ID, and ten secret-scanned
+replay inputs, but omits agent replies, tool output, raw simulator state,
+contracts, and LLM rationale. `agent-antibody immunity verify --repository-root
+.` replays every persisted memory through the production ADK target wrapper and
+verifies that all ten attacks are blocked by a policy rule while normal utility
+remains healthy. It also verifies the dashboard snapshot and fails if any
+registered target has no memory.
+
+The merged artifacts are the policy input for target hosts:
+
+```python
+from agent_antibody.enforcement import run_with_persisted_immunity
+
+# Runs the agent through the Policy Gateway using only policies reconstructed
+# from immutable immunities/v1 memory.
+run_with_persisted_immunity(case, adapter=adapter, agent=agent, repository_root=repo_root)
+```
+
+`agent-antibody immunity audit --base-revision <base>` rejects deletion or
+modification of prior immutable artifact files. A snapshot may be regenerated,
+but only when it exactly matches the artifact projection.
 
 The GitHub flow is intentionally split at the trust boundary:
 
@@ -182,12 +204,18 @@ Agent PR (read-only candidate workflow)
 
 `Agent Antibody Candidate` executes candidate code with only `contents: read`,
 no secrets, no cache, and no write token. `Agent Antibody Remediate` runs only
-trusted default-branch control-plane code, validates the typed artifact, writes
-only `immunities/v1/**`, and opens a draft PR whose base is the original PR
-branch. Fork PRs never receive an automatic write/PR; they keep the read-only
-candidate result. The GitHub-only candidate result is a draft-remediation aid,
-not a release gate: the existing Cloud Run live Gemini gate remains the release
-authority until a fixed external sandbox harness is configured.
+trusted default-branch control-plane code. It independently fetches the PR
+diff, recomputes affected targets and source fingerprints, rejects missing or
+forged candidate records, writes only additive `immunities/v1/**` files, and
+opens a stacked draft PR whose base is the original PR branch. Fork PRs never
+receive an automatic write/PR. Existing memory is append-only; a rerun reuses
+the already-created remediation branch rather than overwriting it.
+
+This GitHub-only path is deliberately a draft-remediation aid, not a release
+gate: it is a deterministic ADK policy-enforcement harness, not proof of how a
+live model will interpret arbitrary prompt text. The Cloud Run live Gemini gate
+remains the release authority until a fixed external candidate sandbox can issue
+signed campaign receipts.
 
 For a local dry run:
 

@@ -14,9 +14,11 @@ from agent_antibody.generic_runner import CaseRun
 from agent_antibody.immunity_artifacts import (
     SnapshotLifecycle,
     apply_evaluation,
+    audit_immutable_changes,
     evaluate_repository,
     load_artifacts,
     verify_artifact,
+    verify_snapshot,
 )
 from agent_antibody.portfolio_demo import run_portfolio_demo, run_target_demo
 from agent_antibody.recipes import (
@@ -220,6 +222,15 @@ def _build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--remediation-pr-url")
     apply.add_argument("--workflow-run-url")
     apply.add_argument(
+        "--trusted-source-revision",
+        help="Current PR head SHA independently resolved by the trusted writer",
+    )
+    apply.add_argument(
+        "--trusted-changed-files",
+        type=Path,
+        help="Newline-delimited changed paths independently fetched by the trusted writer",
+    )
+    apply.add_argument(
         "--refresh-snapshot",
         action="store_true",
         help="Rewrite only the allowlisted snapshot after a generated PR URL is known",
@@ -236,6 +247,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="all",
     )
     verify.add_argument("--json", action="store_true")
+
+    audit = immunity_subparsers.add_parser(
+        "audit",
+        help="Reject immutable-memory deletion, modification, or untruthful dashboard changes",
+    )
+    audit.add_argument("--repository-root", type=Path, default=Path("."))
+    audit.add_argument("--base-revision", required=True)
+    audit.add_argument("--head-revision", default="HEAD")
     return parser
 
 
@@ -296,9 +315,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Agent Antibody target portfolio")
             for report in reports:
                 print(f"\n{report.target.name}")
-                print(_case_run_row("deterministic / vulnerable", report.vulnerable))
-                print(_case_run_row("deterministic / protected", report.protected))
-                print(_case_run_row("deterministic / normal", report.normal))
+                print(_case_run_row("ADK harness / vulnerable", report.vulnerable))
+                print(_case_run_row("ADK harness / protected", report.protected))
+                print(_case_run_row("ADK harness / normal", report.normal))
                 print(f"Memory seed        {report.selected_attack.plan_id} (9 holdouts)")
                 metrics = report.suite_metrics
                 print(
@@ -435,11 +454,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 remediation_pr_url=cast(str | None, args.remediation_pr_url),
                 workflow_run_url=cast(str | None, args.workflow_run_url),
             )
+            trusted_changed_files = cast(Path | None, args.trusted_changed_files)
+            trusted_changed_paths = (
+                tuple(
+                    line.strip()
+                    for line in trusted_changed_files.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+                if trusted_changed_files is not None
+                else None
+            )
             written = apply_evaluation(
                 evaluation,
                 repository_root=cast(Path, args.repository_root),
                 lifecycle=lifecycle,
                 refresh_snapshot=cast(bool, args.refresh_snapshot),
+                trusted_source_revision=cast(str | None, args.trusted_source_revision),
+                trusted_changed_paths=trusted_changed_paths,
             )
             print(json.dumps({"written": [str(path) for path in written]}, ensure_ascii=False))
             return 0
@@ -450,11 +481,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repository_root=cast(Path, args.repository_root),
                 target_id=None if selected == "all" else selected,
             )
+            expected_targets = TARGET_IDS if selected == "all" else (selected,)
+            present_targets = {artifact.target_id for artifact in artifacts}
+            missing_targets = tuple(
+                target_id for target_id in expected_targets if target_id not in present_targets
+            )
             verification_results = tuple(verify_artifact(artifact) for artifact in artifacts)
+            snapshot_error: str | None = None
+            if selected == "all":
+                try:
+                    verify_snapshot(repository_root=cast(Path, args.repository_root))
+                except (FileNotFoundError, ValueError) as error:
+                    snapshot_error = str(error)
             if args.json:
                 print(
                     json.dumps(
-                        [result.model_dump(mode="json") for result in verification_results],
+                        {
+                            "artifacts": [
+                                result.model_dump(mode="json") for result in verification_results
+                            ],
+                            "missing_targets": list(missing_targets),
+                            "snapshot_error": snapshot_error,
+                        },
                         ensure_ascii=False,
                         indent=2,
                     )
@@ -467,10 +515,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"{status:<4} {result.target_id:<12} {result.artifact_id} "
                         f"blocks={result.blocked_attacks}/{result.attack_count} reasons={reasons}"
                     )
+                if missing_targets:
+                    print(f"FAIL missing immunity memory for: {','.join(missing_targets)}")
+                if snapshot_error is not None:
+                    print(f"FAIL snapshot={snapshot_error}")
             return (
                 0
-                if verification_results and all(result.passed for result in verification_results)
+                if (
+                    verification_results
+                    and not missing_targets
+                    and snapshot_error is None
+                    and all(result.passed for result in verification_results)
+                )
                 else 1
             )
+
+        if immunity_command == "audit":
+            audit_immutable_changes(
+                repository_root=cast(Path, args.repository_root),
+                base_revision=cast(str, args.base_revision),
+                head_revision=cast(str, args.head_revision),
+            )
+            print("PASS immutable immunity diff")
+            return 0
 
     return 2

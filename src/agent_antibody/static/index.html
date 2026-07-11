@@ -333,7 +333,7 @@
             <p class="panel-kicker">How immunity is maintained</p>
             <h2 id="lifecycle-title">An agent change starts a verification loop</h2>
           </div>
-          <p>Gemini proposes attacks and antibodies. Tool traces, policy decisions, and simulator state changes decide whether the result is accepted.</p>
+          <p>CI uses a target-specific ADK enforcement harness; the Cloud Run release gate adds live Gemini attack and policy generation. Tool traces, policy decisions, and simulator state changes decide acceptance.</p>
         </div>
         <div class="flow" aria-label="Agent Antibody CI lifecycle">
           <article class="flow-step"><small>01</small><strong>Agent PR changes</strong><span>observed</span></article>
@@ -528,7 +528,8 @@
         memoryRow.append(node("span", "badge", `${integer(memory.holdout_count)} HELD-OUT VARIANTS`));
         appendFact(facts, "Regression memory", memoryRow);
         appendFact(facts, "Memory artifact", text(memory.artifact_id));
-        appendFact(facts, "Generated", text(memory.generated_at));
+        appendFact(facts, "Verification harness", text(memory.evaluation_harness));
+        appendFact(facts, "Captured", text(memory.captured_at));
         detail.append(facts);
         card.append(summary, detail);
         return card;

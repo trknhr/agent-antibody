@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -7,6 +8,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from agent_antibody.enforcement import run_with_persisted_immunity
 from agent_antibody.immunity_artifacts import (
     CandidateImmunity,
     ImmunityArtifact,
@@ -18,10 +20,14 @@ from agent_antibody.immunity_artifacts import (
     load_artifacts,
     load_effective_policy,
     load_snapshot,
+    snapshot_path,
+    source_fingerprint,
+    validate_evaluation_for_apply,
     verify_artifact,
+    verify_snapshot,
 )
 from agent_antibody.portfolio_demo import run_target_demo
-from agent_antibody.targets.registry import TARGET_IDS
+from agent_antibody.targets.registry import TARGET_IDS, get_target_adapter
 
 SOURCE_REVISION = "a" * 40
 CAPTURED_AT = datetime(2026, 7, 11, tzinfo=UTC)
@@ -58,7 +64,7 @@ def test_immutable_artifact_rejects_tampering() -> None:
     assert isinstance(first, dict)
     first["payload"] = "quietly change the service"
 
-    with pytest.raises(ValidationError, match="artifact_id does not match"):
+    with pytest.raises(ValidationError, match="report_sha256 does not match"):
         ImmunityArtifact.model_validate(payload)
 
 
@@ -68,10 +74,15 @@ def test_artifact_secret_boundary_rejects_persisted_payloads() -> None:
         source_revision=SOURCE_REVISION,
         captured_at=CAPTURED_AT,
     )
-    attack = artifact.regression.attacks[0].model_copy(update={"payload": "token=super-secret"})
+    for payload in (
+        "token=super-secret",
+        '{"api_key":"super-secret"}',
+        "Authorization: Bearer super-secret",
+    ):
+        attack = artifact.regression.attacks[0].model_copy(update={"payload": payload})
 
-    with pytest.raises(ValueError, match="appears to contain a secret"):
-        attack.validate_secret_boundary()
+        with pytest.raises(ValueError, match="appears to contain a secret"):
+            attack.validate_secret_boundary()
 
 
 def test_apply_evaluation_writes_only_immutable_memories_and_safe_snapshot(tmp_path: Path) -> None:
@@ -112,8 +123,23 @@ def test_apply_evaluation_writes_only_immutable_memories_and_safe_snapshot(tmp_p
     assert snapshot.lifecycle.state == "verified_pending_review"
     assert snapshot.lifecycle.source_pr_number == 42
     assert "payload" not in snapshot.model_dump_json()
+    assert verify_snapshot(repository_root=tmp_path) == snapshot
     assert load_effective_policy(repository_root=tmp_path, target_id="supportmate").rules
     assert all(verify_artifact(artifact).passed for artifact in artifacts)
+    support_adapter = get_target_adapter("supportmate")
+    support_artifact = next(
+        artifact for artifact in artifacts if artifact.target_id == "supportmate"
+    )
+    support_case = support_adapter.materialize_attack(
+        support_artifact.regression.attacks[0].to_plan()
+    )
+    protected = run_with_persisted_immunity(
+        support_case,
+        adapter=support_adapter,
+        agent=support_adapter.create_harness_agent(support_case, protected=True),
+        repository_root=tmp_path,
+    )
+    assert protected.oracle.status.value == "IMMUNE"
     assert apply_evaluation(evaluation, repository_root=tmp_path) == ()
 
 
@@ -143,3 +169,88 @@ def test_snapshot_uses_only_persisted_memories(tmp_path: Path) -> None:
 
     assert [target.target_id for target in snapshot.targets] == ["repomate"]
     assert snapshot.targets[0].memory_count == 1
+
+
+def test_trusted_apply_rejects_an_empty_or_unbound_candidate(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "agent_antibody"
+    source.mkdir(parents=True)
+    (source / "candidate.py").write_text("# candidate source\n", encoding="utf-8")
+    fingerprint = source_fingerprint(repository_root=tmp_path, target_id="supportmate")
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision=SOURCE_REVISION,
+        source_fingerprint=fingerprint,
+        captured_at=CAPTURED_AT,
+    )
+    changed_paths = ("src/agent_antibody/targets/supportmate.py",)
+    empty = ImmunityEvaluation(
+        source_revision=SOURCE_REVISION,
+        changed_paths=changed_paths,
+        evaluated_at=CAPTURED_AT,
+        candidates=(),
+    )
+    with pytest.raises(ValueError, match="target set"):
+        validate_evaluation_for_apply(
+            empty,
+            repository_root=tmp_path,
+            trusted_source_revision=SOURCE_REVISION,
+            trusted_changed_paths=changed_paths,
+        )
+
+    unbound = ImmunityEvaluation(
+        source_revision=SOURCE_REVISION,
+        changed_paths=changed_paths,
+        evaluated_at=CAPTURED_AT,
+        candidates=(CandidateImmunity(action="create", artifact=artifact),),
+    )
+    with pytest.raises(ValueError, match="changed paths"):
+        validate_evaluation_for_apply(
+            unbound.model_copy(update={"changed_paths": ("README.md",)}),
+            repository_root=tmp_path,
+            trusted_source_revision=SOURCE_REVISION,
+            trusted_changed_paths=changed_paths,
+        )
+
+    wrong_fingerprint_artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision=SOURCE_REVISION,
+        source_fingerprint="b" * 64,
+        captured_at=CAPTURED_AT,
+    )
+    with pytest.raises(ValueError, match="source fingerprint"):
+        validate_evaluation_for_apply(
+            unbound.model_copy(
+                update={
+                    "candidates": (
+                        CandidateImmunity(
+                            action="create",
+                            artifact=wrong_fingerprint_artifact,
+                        ),
+                    )
+                }
+            ),
+            repository_root=tmp_path,
+            trusted_source_revision=SOURCE_REVISION,
+            trusted_changed_paths=changed_paths,
+        )
+
+
+def test_snapshot_rejects_unallowlisted_nested_content(tmp_path: Path) -> None:
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("repomate"),
+        source_revision=SOURCE_REVISION,
+        captured_at=CAPTURED_AT,
+    )
+    evaluation = ImmunityEvaluation(
+        source_revision=SOURCE_REVISION,
+        changed_paths=("src/agent_antibody/targets/repomate.py",),
+        evaluated_at=CAPTURED_AT,
+        candidates=(CandidateImmunity(action="create", artifact=artifact),),
+    )
+    apply_evaluation(evaluation, repository_root=tmp_path)
+    raw = json.loads(snapshot_path(repository_root=tmp_path).read_text(encoding="utf-8"))
+    raw["targets"][0]["latest_memory"]["memory_seed"]["payload"] = "must-not-publish"
+    snapshot_path(repository_root=tmp_path).write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="payload"):
+        verify_snapshot(repository_root=tmp_path)

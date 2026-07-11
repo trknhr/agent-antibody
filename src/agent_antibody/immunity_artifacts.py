@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
@@ -26,8 +27,11 @@ SNAPSHOT_FILENAME = "snapshot.json"
 _ARTIFACT_ID_PATTERN = re.compile(r"^imm-[a-z][a-z0-9-]{0,63}-[0-9a-f]{20}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_PATTERN = re.compile(r"^[0-9a-f]{7,64}$")
+_HARNESS_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
+_TRUSTED_HARNESS_IDS = {"adk-scripted-v1", "live-gemini-v1"}
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key|password|token|secret)\s*[=:]\s*\S+"),
+    re.compile(r"(?i)(?:api[_-]?key|password|token|secret)\s*[\"']?\s*[:=]\s*[\"']?\S+"),
+    re.compile(r"(?i)\b(?:authorization|x-api-key)\s*:\s*(?:bearer\s+)?\S+"),
     re.compile(r"\b(?:sk|AIza)[-_A-Za-z0-9]{12,}\b"),
 )
 
@@ -60,10 +64,30 @@ def _require_revision(value: str) -> None:
 
 
 def _assert_no_secret(value: object, *, field_name: str) -> None:
-    if not isinstance(value, str):
+    if isinstance(value, str):
+        if any(pattern.search(value) for pattern in _SECRET_PATTERNS):
+            raise ValueError(f"{field_name} appears to contain a secret")
         return
-    if any(pattern.search(value) for pattern in _SECRET_PATTERNS):
-        raise ValueError(f"{field_name} appears to contain a secret")
+    if isinstance(value, dict):
+        mapping = cast(dict[object, object], value)
+        for key, nested in mapping.items():
+            if (
+                isinstance(key, str)
+                and re.fullmatch(
+                    r"(?i)(?:api[_-]?key|password|token|secret|authorization|x-api-key)",
+                    key,
+                )
+                and nested is not None
+                and nested != ""
+            ):
+                raise ValueError(f"{field_name} appears to contain a secret")
+            _assert_no_secret(key, field_name=field_name)
+            _assert_no_secret(nested, field_name=field_name)
+        return
+    if isinstance(value, (tuple, list)):
+        sequence = cast(tuple[object, ...] | list[object], value)
+        for nested in sequence:
+            _assert_no_secret(nested, field_name=field_name)
 
 
 class PersistedAttack(BaseModel):
@@ -116,6 +140,11 @@ class PersistedPolicy(BaseModel):
     rules: tuple[ToolPolicyRule, ...]
     untrusted_sources: tuple[str, ...]
 
+    @model_validator(mode="after")
+    def validate_secret_boundary(self) -> PersistedPolicy:
+        _assert_no_secret(self.model_dump(mode="json"), field_name="persisted policy")
+        return self
+
     def policy(self) -> PolicyRules:
         return PolicyRules(
             rules=self.rules,
@@ -160,6 +189,7 @@ class ImmunityArtifact(BaseModel):
     source_fingerprint: str
     manifest_sha256: str
     report_sha256: str
+    evaluation_harness: str
     captured_at: datetime
     policy: PersistedPolicy
     regression: RegressionExpectation
@@ -172,6 +202,13 @@ class ImmunityArtifact(BaseModel):
         _require_sha256(self.source_fingerprint, field_name="source_fingerprint")
         _require_sha256(self.manifest_sha256, field_name="manifest_sha256")
         _require_sha256(self.report_sha256, field_name="report_sha256")
+        if (
+            _HARNESS_ID_PATTERN.fullmatch(self.evaluation_harness) is None
+            or self.evaluation_harness not in _TRUSTED_HARNESS_IDS
+        ):
+            raise ValueError("artifact evaluation_harness is not a trusted harness identifier")
+        if self.report_sha256 != self.expected_report_sha256():
+            raise ValueError("report_sha256 does not match immutable policy and regression data")
         if self.artifact_id != self.expected_artifact_id():
             raise ValueError("artifact_id does not match immutable artifact content")
         for attack in self.regression.attacks:
@@ -186,12 +223,36 @@ class ImmunityArtifact(BaseModel):
             "source_fingerprint": self.source_fingerprint,
             "manifest_sha256": self.manifest_sha256,
             "report_sha256": self.report_sha256,
+            "evaluation_harness": self.evaluation_harness,
             "policy": self.policy.model_dump(mode="json"),
             "regression": self.regression.model_dump(mode="json"),
         }
 
     def expected_artifact_id(self) -> str:
         return f"imm-{self.target_id}-{_digest(self.identity_payload())[:20]}"
+
+    def has_same_immutable_identity(self, other: ImmunityArtifact) -> bool:
+        """Ignore capture wall time when deciding whether memory already exists."""
+
+        return self.identity_payload() == other.identity_payload()
+
+    def report_payload(self) -> dict[str, object]:
+        return {
+            "target_id": self.target_id,
+            "evaluation_harness": self.evaluation_harness,
+            "policy": self.policy.model_dump(mode="json"),
+            "regression": self.regression.model_dump(mode="json"),
+            "suite_metrics": {
+                "total": self.regression.attack_count,
+                "success_before": self.regression.infected_before,
+                "success_after": self.regression.infected_after,
+                "confirmed_blocked": self.regression.policy_blocks,
+                "normal_success": self.regression.normal_healthy,
+            },
+        }
+
+    def expected_report_sha256(self) -> str:
+        return _digest(self.report_payload())
 
     def to_yaml(self) -> str:
         return yaml.safe_dump(
@@ -252,6 +313,7 @@ class ImmunityArtifact(BaseModel):
         )
         report_payload = {
             "target_id": target_id,
+            "evaluation_harness": getattr(report, "evaluation_harness", "live-gemini-v1"),
             "policy": policy.model_dump(mode="json"),
             "regression": regression.model_dump(mode="json"),
             "suite_metrics": report.suite_metrics.model_dump(mode="json"),
@@ -267,6 +329,7 @@ class ImmunityArtifact(BaseModel):
             "source_fingerprint": source_hash,
             "manifest_sha256": manifest_sha256,
             "report_sha256": report_sha256,
+            "evaluation_harness": getattr(report, "evaluation_harness", "live-gemini-v1"),
             "policy": policy.model_dump(mode="json"),
             "regression": regression.model_dump(mode="json"),
         }
@@ -278,6 +341,7 @@ class ImmunityArtifact(BaseModel):
             source_fingerprint=source_hash,
             manifest_sha256=manifest_sha256,
             report_sha256=report_sha256,
+            evaluation_harness=getattr(report, "evaluation_harness", "live-gemini-v1"),
             captured_at=(captured_at or datetime.now(UTC)).astimezone(UTC),
             policy=policy,
             regression=regression,
@@ -286,6 +350,8 @@ class ImmunityArtifact(BaseModel):
     def validate_for_runtime(self) -> None:
         adapter = get_target_adapter(self.target_id)
         manifest = adapter.manifest
+        if self.manifest_sha256 != _manifest_digest(self.target_id):
+            raise ValueError("artifact manifest digest does not match the trusted target manifest")
         suite = self.regression.attack_suite()
         suite.validate_for(manifest)
         declared_sources = {surface.source_kind for surface in manifest.injection_surfaces}
@@ -345,7 +411,7 @@ def verify_artifact(artifact: ImmunityArtifact) -> ArtifactVerification:
             adapter=adapter,
             mode=PolicyMode.ENFORCE,
             rules=policy,
-            agent=adapter.create_replay_agent(),
+            agent=adapter.create_harness_agent(case, protected=True),
         )
         if not attack_request_observed(run):
             reasons.append(f"attack_request_not_observed:{persisted.plan_id}")
@@ -368,7 +434,7 @@ def verify_artifact(artifact: ImmunityArtifact) -> ArtifactVerification:
             adapter=adapter,
             mode=PolicyMode.ENFORCE,
             rules=policy,
-            agent=adapter.create_replay_agent(),
+            agent=adapter.create_harness_agent(case, protected=True),
         )
         if run.oracle.normal_task_succeeded and run.oracle.status.value == "HEALTHY":
             healthy_normal_cases += 1
@@ -426,7 +492,7 @@ def write_artifact(artifact: ImmunityArtifact, *, repository_root: Path) -> Path
     destination = _safe_artifact_path(repository_root, artifact)
     if destination.exists():
         existing = load_artifact(destination)
-        if existing == artifact:
+        if existing.has_same_immutable_identity(artifact):
             return destination
         raise ValueError("immutable artifact destination already contains different content")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -460,10 +526,17 @@ def load_artifacts(
         if directory.is_symlink():
             raise ValueError("immunity artifact directory may not be a symlink")
         for path in sorted(directory.glob("*.yaml")):
+            if path.is_symlink():
+                raise ValueError("immunity artifact file may not be a symlink")
             artifact = load_artifact(path)
             if artifact.target_id != current_target:
                 raise ValueError("artifact target does not match its immutable directory")
+            if path.name != f"{artifact.artifact_id}.yaml":
+                raise ValueError("artifact filename does not match its immutable artifact ID")
             artifacts.append(artifact)
+    artifact_ids = [artifact.artifact_id for artifact in artifacts]
+    if len(artifact_ids) != len(set(artifact_ids)):
+        raise ValueError("immunity storage contains duplicate immutable artifact IDs")
     return tuple(artifacts)
 
 
@@ -567,14 +640,19 @@ _SHARED_SECURITY_PATHS = {
     "src/agent_antibody/targets/registry.py",
     "src/agent_antibody/trace.py",
 }
+_CONTROL_PLANE_PATHS = {
+    "pyproject.toml",
+    "uv.lock",
+    "Dockerfile",
+}
 
 
 def detect_affected_targets(changed_paths: tuple[str, ...]) -> tuple[str, ...]:
     normalized = {_normalize_changed_path(path) for path in changed_paths}
     if not normalized:
         return ()
-    if normalized.intersection(_SHARED_SECURITY_PATHS) or any(
-        path.startswith("policies/") or path.startswith("scenarios/") for path in normalized
+    if normalized.intersection(_SHARED_SECURITY_PATHS | _CONTROL_PLANE_PATHS) or any(
+        path.startswith(("policies/", "scenarios/")) for path in normalized
     ):
         return TARGET_IDS
     affected = {
@@ -582,7 +660,13 @@ def detect_affected_targets(changed_paths: tuple[str, ...]) -> tuple[str, ...]:
         for target_id, source_paths in _TARGET_SOURCE_PATHS.items()
         if normalized.intersection(source_paths)
     }
-    return tuple(target_id for target_id in TARGET_IDS if target_id in affected)
+    if affected:
+        return tuple(target_id for target_id in TARGET_IDS if target_id in affected)
+    # New or previously unclassified agent/control-plane Python is security-relevant
+    # until a maintainer explicitly assigns it to one target.  Never silently skip it.
+    if any(path.startswith("src/agent_antibody/") for path in normalized):
+        return TARGET_IDS
+    return ()
 
 
 def source_fingerprint(*, repository_root: Path, target_id: str) -> str:
@@ -590,6 +674,8 @@ def source_fingerprint(*, repository_root: Path, target_id: str) -> str:
         raise ValueError(f"unknown target: {target_id}")
     root = _repository_root(repository_root)
     source_directory = root / "src" / "agent_antibody"
+    if not source_directory.is_dir() or source_directory.is_symlink():
+        raise ValueError("candidate security source directory is missing or unsafe")
     entries: list[tuple[str, str]] = []
     for path in sorted(source_directory.rglob("*.py")):
         if path.is_symlink():
@@ -622,7 +708,14 @@ def evaluate_repository(
             source_fingerprint=source_fingerprint(repository_root=root, target_id=target_id),
         )
         destination = _safe_artifact_path(root, artifact)
-        action: Literal["create", "unchanged"] = "unchanged" if destination.exists() else "create"
+        if destination.exists():
+            existing = load_artifact(destination)
+            if not existing.has_same_immutable_identity(artifact):
+                raise ValueError("candidate artifact collides with different immutable content")
+            artifact = existing
+            action: Literal["create", "unchanged"] = "unchanged"
+        else:
+            action = "create"
         candidates.append(CandidateImmunity(action=action, artifact=artifact))
     return ImmunityEvaluation(
         source_revision=source_revision,
@@ -632,15 +725,178 @@ def evaluate_repository(
     )
 
 
+def validate_evaluation_for_apply(
+    evaluation: ImmunityEvaluation,
+    *,
+    repository_root: Path,
+    trusted_source_revision: str | None = None,
+    trusted_changed_paths: tuple[str, ...] | None = None,
+) -> None:
+    """Bind untrusted evaluation data to a trusted candidate checkout before writing.
+
+    Candidate evaluators may execute hostile source code, so their JSON is evidence
+    only.  This function independently recomputes its target set, source
+    fingerprints, and immutable-file action from trusted control-plane code.
+    """
+
+    root = _repository_root(repository_root)
+    expected_revision = trusted_source_revision or evaluation.source_revision
+    _require_revision(expected_revision)
+    if evaluation.source_revision != expected_revision:
+        raise ValueError("evaluation source revision does not match the trusted candidate SHA")
+
+    trusted_paths = (
+        trusted_changed_paths if trusted_changed_paths is not None else evaluation.changed_paths
+    )
+    expected_paths = tuple(_normalize_changed_path(path) for path in trusted_paths)
+    if evaluation.changed_paths != expected_paths:
+        raise ValueError("evaluation changed paths do not match the trusted pull request diff")
+
+    expected_targets = detect_affected_targets(expected_paths)
+    actual_targets = tuple(candidate.artifact.target_id for candidate in evaluation.candidates)
+    if actual_targets != expected_targets:
+        raise ValueError(
+            "evaluation target set does not match the trusted changed-path target selection"
+        )
+
+    for candidate in evaluation.candidates:
+        artifact = candidate.artifact
+        if artifact.source_revision != expected_revision:
+            raise ValueError("candidate artifact source revision does not match the trusted SHA")
+        if trusted_source_revision is not None or trusted_changed_paths is not None:
+            expected_fingerprint = source_fingerprint(
+                repository_root=root,
+                target_id=artifact.target_id,
+            )
+            if artifact.source_fingerprint != expected_fingerprint:
+                raise ValueError(
+                    "candidate artifact source fingerprint does not match candidate source"
+                )
+        destination = _safe_artifact_path(root, artifact)
+        if destination.exists():
+            existing = load_artifact(destination)
+            if not existing.has_same_immutable_identity(artifact):
+                raise ValueError("candidate artifact collides with different immutable content")
+            expected_action: Literal["create", "unchanged"] = "unchanged"
+        else:
+            expected_action = "create"
+        if candidate.action != expected_action:
+            local_idempotent_retry = (
+                trusted_source_revision is None
+                and trusted_changed_paths is None
+                and candidate.action == "create"
+                and expected_action == "unchanged"
+            )
+            if not local_idempotent_retry:
+                raise ValueError(
+                    "candidate artifact action does not match trusted immutable storage"
+                )
+        artifact.validate_for_runtime()
+
+
+def _is_immutable_artifact_path(path: str) -> bool:
+    candidate = PurePosixPath(path)
+    parts = candidate.parts
+    if len(parts) != 4 or parts[:2] != ("immunities", "v1") or parts[2] not in TARGET_IDS:
+        return False
+    stem = candidate.stem
+    return (
+        candidate.suffix == ".yaml"
+        and _ARTIFACT_ID_PATTERN.fullmatch(stem) is not None
+        and stem.startswith(f"imm-{parts[2]}-")
+    )
+
+
+def audit_immutable_changes(
+    *,
+    repository_root: Path,
+    base_revision: str,
+    head_revision: str = "HEAD",
+) -> None:
+    """Permit only additive artifact files and a canonical dashboard snapshot in a PR diff."""
+
+    root = _repository_root(repository_root)
+    completed = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            base_revision,
+            head_revision,
+            "--",
+            IMMUNITY_DIRECTORY.as_posix(),
+        ],
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"could not inspect immutable immunity diff: {message}")
+    fields = completed.stdout.decode("utf-8", errors="strict").split("\0")
+    for index in range(0, len(fields) - 1, 2):
+        status, path = fields[index], fields[index + 1]
+        if not status or not path:
+            continue
+        if path == (IMMUNITY_DIRECTORY / SNAPSHOT_FILENAME).as_posix():
+            if status not in {"A", "M"}:
+                raise ValueError("immunity snapshot may only be added or regenerated")
+            continue
+        if not _is_immutable_artifact_path(path):
+            raise ValueError(f"immunity diff contains a non-canonical path: {path}")
+        if status != "A":
+            raise ValueError(f"immutable immunity artifact must be additive, not {status}: {path}")
+
+    # A snapshot changed in the diff must be a truthful projection of current memory.
+    snapshot = snapshot_path(repository_root=root)
+    if snapshot.exists():
+        verify_snapshot(repository_root=root)
+
+
+class SnapshotMemorySeed(BaseModel):
+    """The safe, display-only identity of one persisted attack seed."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    plan_id: str = Field(min_length=1, max_length=160)
+    technique: str = Field(min_length=1, max_length=80)
+    surface_id: str = Field(min_length=1, max_length=160)
+
+
+class SnapshotSuiteMetrics(BaseModel):
+    """Fixed public summary; raw prompts, traces, and outputs never enter a snapshot."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total: Literal[10] = 10
+    success_before: Literal[10] = 10
+    success_after: Literal[0] = 0
+    confirmed_blocked: Literal[10] = 10
+    normal_success: Literal[1] = 1
+
+
 class SnapshotMemory(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     artifact_id: str
     source_revision: str
     source_fingerprint: str
+    evaluation_harness: str
     captured_at: datetime
-    memory_seed: dict[str, str]
-    holdout_count: int
+    memory_seed: SnapshotMemorySeed
+    holdout_count: Literal[9] = 9
+
+    @model_validator(mode="after")
+    def validate_public_identity(self) -> SnapshotMemory:
+        if _ARTIFACT_ID_PATTERN.fullmatch(self.artifact_id) is None:
+            raise ValueError("snapshot artifact_id is invalid")
+        _require_revision(self.source_revision)
+        _require_sha256(self.source_fingerprint, field_name="snapshot source_fingerprint")
+        if self.evaluation_harness not in _TRUSTED_HARNESS_IDS:
+            raise ValueError("snapshot evaluation_harness is invalid")
+        return self
 
 
 class SnapshotTarget(BaseModel):
@@ -650,9 +906,21 @@ class SnapshotTarget(BaseModel):
     name: str
     dangerous_tools: tuple[str, ...]
     rules: tuple[ToolPolicyRule, ...]
-    suite_metrics: dict[str, int]
-    memory_count: int
+    suite_metrics: SnapshotSuiteMetrics
+    memory_count: int = Field(ge=1)
     latest_memory: SnapshotMemory
+
+    @model_validator(mode="after")
+    def validate_target_summary(self) -> SnapshotTarget:
+        if self.target_id not in TARGET_IDS:
+            raise ValueError("snapshot target is not registered")
+        adapter = get_target_adapter(self.target_id)
+        if self.name != adapter.manifest.name:
+            raise ValueError("snapshot target name does not match the registered target")
+        expected_tools = tuple(tool.name for tool in adapter.manifest.tools if tool.mutates_state)
+        if self.dangerous_tools != expected_tools:
+            raise ValueError("snapshot dangerous tools do not match the registered target")
+        return self
 
 
 class SnapshotLifecycle(BaseModel):
@@ -665,6 +933,24 @@ class SnapshotLifecycle(BaseModel):
     remediation_pr_url: str | None = None
     workflow_run_url: str | None = None
 
+    @model_validator(mode="after")
+    def validate_links(self) -> SnapshotLifecycle:
+        for field_name in (
+            "source_pr_url",
+            "remediation_pr_url",
+            "workflow_run_url",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if re.fullmatch(r"https://[^/@\s]+(?:/[^\s]*)?", value) is None:
+                raise ValueError(f"snapshot {field_name} must be an https URL without credentials")
+        if self.remediation_branch is not None and not re.fullmatch(
+            r"antibody/pr-[1-9][0-9]*-[0-9a-f]{7,64}", self.remediation_branch
+        ):
+            raise ValueError("snapshot remediation branch is invalid")
+        return self
+
 
 class ImmunitySnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -674,6 +960,17 @@ class ImmunitySnapshot(BaseModel):
     source_revision: str
     lifecycle: SnapshotLifecycle
     targets: tuple[SnapshotTarget, ...]
+
+    @model_validator(mode="after")
+    def validate_public_snapshot(self) -> ImmunitySnapshot:
+        _require_revision(self.source_revision)
+        target_ids = [target.target_id for target in self.targets]
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("snapshot contains duplicate targets")
+        expected_order = tuple(target_id for target_id in TARGET_IDS if target_id in target_ids)
+        if tuple(target_ids) != expected_order:
+            raise ValueError("snapshot targets must use registry order")
+        return self
 
 
 def create_snapshot(
@@ -708,25 +1005,20 @@ def create_snapshot(
                     repository_root=repository_root,
                     target_id=target_id,
                 ).rules,
-                suite_metrics={
-                    "total": latest.regression.attack_count,
-                    "success_before": latest.regression.infected_before,
-                    "success_after": latest.regression.infected_after,
-                    "confirmed_blocked": latest.regression.policy_blocks,
-                    "normal_success": latest.regression.normal_healthy,
-                },
+                suite_metrics=SnapshotSuiteMetrics(),
                 memory_count=len(target_artifacts),
                 latest_memory=SnapshotMemory(
                     artifact_id=latest.artifact_id,
                     source_revision=latest.source_revision,
                     source_fingerprint=latest.source_fingerprint,
+                    evaluation_harness=latest.evaluation_harness,
                     captured_at=latest.captured_at,
-                    memory_seed={
-                        "plan_id": seed.plan_id,
-                        "technique": seed.technique.value,
-                        "surface_id": seed.surface_id,
-                    },
-                    holdout_count=latest.regression.attack_count - 1,
+                    memory_seed=SnapshotMemorySeed(
+                        plan_id=seed.plan_id,
+                        technique=seed.technique.value,
+                        surface_id=seed.surface_id,
+                    ),
+                    holdout_count=9,
                 ),
             )
         )
@@ -741,6 +1033,11 @@ def create_snapshot(
 def snapshot_path(*, repository_root: Path) -> Path:
     root = _repository_root(repository_root)
     destination = root / IMMUNITY_DIRECTORY / SNAPSHOT_FILENAME
+    current = root
+    for part in (*IMMUNITY_DIRECTORY.parts, SNAPSHOT_FILENAME):
+        current = current / part
+        if current.exists() and current.is_symlink():
+            raise ValueError("snapshot path may not traverse a symlink")
     if not destination.resolve(strict=False).is_relative_to(root):
         raise ValueError("snapshot path escapes the repository")
     return destination
@@ -762,14 +1059,48 @@ def load_snapshot(*, repository_root: Path) -> ImmunitySnapshot:
     )
 
 
+def _snapshot_content(snapshot: ImmunitySnapshot) -> dict[str, object]:
+    """Return the snapshot fields derived from immutable memory, excluding wall time."""
+
+    content = snapshot.model_dump(mode="json")
+    content.pop("generated_at", None)
+    return cast(dict[str, object], content)
+
+
+def snapshot_matches(left: ImmunitySnapshot, right: ImmunitySnapshot) -> bool:
+    return _snapshot_content(left) == _snapshot_content(right)
+
+
+def verify_snapshot(*, repository_root: Path) -> ImmunitySnapshot:
+    """Reject a dashboard summary that cannot be reconstructed from immutable artifacts."""
+
+    snapshot = load_snapshot(repository_root=repository_root)
+    expected = create_snapshot(
+        repository_root=repository_root,
+        source_revision=snapshot.source_revision,
+        lifecycle=snapshot.lifecycle,
+    )
+    if not snapshot_matches(snapshot, expected):
+        raise ValueError("snapshot does not match the immutable immunity artifacts")
+    return snapshot
+
+
 def apply_evaluation(
     evaluation: ImmunityEvaluation,
     *,
     repository_root: Path,
     lifecycle: SnapshotLifecycle | None = None,
     refresh_snapshot: bool = False,
+    trusted_source_revision: str | None = None,
+    trusted_changed_paths: tuple[str, ...] | None = None,
 ) -> tuple[Path, ...]:
     root = _repository_root(repository_root)
+    validate_evaluation_for_apply(
+        evaluation,
+        repository_root=root,
+        trusted_source_revision=trusted_source_revision,
+        trusted_changed_paths=trusted_changed_paths,
+    )
     written: list[Path] = []
     for candidate in evaluation.candidates:
         artifact = candidate.artifact
@@ -790,5 +1121,10 @@ def apply_evaluation(
         source_revision=evaluation.source_revision,
         lifecycle=lifecycle,
     )
+    destination = snapshot_path(repository_root=root)
+    if destination.exists():
+        existing_snapshot = load_snapshot(repository_root=root)
+        if snapshot_matches(existing_snapshot, snapshot):
+            return tuple(written)
     written.append(write_snapshot(snapshot, repository_root=root))
     return tuple(written)
