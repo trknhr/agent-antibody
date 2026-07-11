@@ -12,10 +12,10 @@ from agent_antibody.contracts import (
     JsonPrimitive,
     JsonValue,
     SignedApproval,
-    SourceKind,
     TaskContract,
     ToolName,
 )
+from agent_antibody.core_types import SourceId, ToolId
 from agent_antibody.signing import ApprovalSigner
 
 _LESS_THAN = re.compile(r"^<\s*(\d+)$")
@@ -114,10 +114,10 @@ class PolicyRules(BaseModel):
     version: Literal[1] = 1
     default_action: Literal["allow"] = "allow"
     rules: tuple[ToolPolicyRule, ...] = ()
-    untrusted_sources: tuple[SourceKind, ...] = (
-        SourceKind.RUNBOOK_CONTENT,
-        SourceKind.ISSUE_BODY,
-        SourceKind.LOG_CONTENT,
+    untrusted_sources: tuple[SourceId, ...] = (
+        "runbook_content",
+        "issue_body",
+        "log_content",
     )
 
     @classmethod
@@ -142,7 +142,8 @@ class PolicyEvaluation(BaseModel):
     reasons: tuple[str, ...] = ()
     requires_approval: bool = False
     matched_rule_ids: tuple[str, ...] = ()
-    untrusted_source_kinds: tuple[SourceKind, ...] = ()
+    untrusted_source_kinds: tuple[SourceId, ...] = ()
+    hard_denial: bool = False
 
 
 class PolicyEngine:
@@ -154,11 +155,11 @@ class PolicyEngine:
         self,
         *,
         contract: TaskContract,
-        tool: ToolName,
+        tool: ToolId,
         arguments: dict[str, JsonValue],
-        usage: dict[ToolName, int],
+        usage: dict[ToolId, int],
         approval: SignedApproval | None,
-        observed_source_kinds: tuple[SourceKind, ...] = (),
+        observed_source_kinds: tuple[SourceId, ...] = (),
         now: datetime | None = None,
     ) -> PolicyEvaluation:
         reasons: list[str] = []
@@ -172,11 +173,30 @@ class PolicyEngine:
         if tool not in contract.allowed_tools:
             reasons.append("tool_not_allowed_by_task")
 
-        service = arguments.get("service")
-        if isinstance(service, str) and service not in contract.resources:
-            reasons.append("resource_not_allowed_by_task")
+        capabilities = {capability.tool: capability for capability in contract.capabilities}
+        capability = capabilities.get(tool)
+        if contract.capabilities and capability is None:
+            reasons.append("tool_capability_missing")
+        if capability is not None:
+            if any(
+                argument not in arguments or arguments[argument] != expected
+                for argument, expected in capability.exact_arguments.items()
+            ):
+                reasons.append("capability_exact_argument_mismatch")
+            if any(
+                not isinstance(arguments.get(argument), str)
+                or arguments[argument] not in contract.resources
+                for argument in capability.resource_arguments
+            ):
+                reasons.append("capability_resource_not_allowed")
+            if capability.max_calls is not None and usage.get(tool, 0) >= capability.max_calls:
+                reasons.append("capability_call_limit_exceeded")
+        else:
+            service = arguments.get("service")
+            if isinstance(service, str) and service not in contract.resources:
+                reasons.append("resource_not_allowed_by_task")
 
-        if tool == ToolName.POST_ISSUE:
+        if tool == ToolName.POST_ISSUE and not contract.capabilities:
             constraint = contract.tool_constraints.post_issue
             if constraint is None:
                 reasons.append("post_issue_constraint_missing")
@@ -217,10 +237,26 @@ class PolicyEngine:
                 key=str,
             )
         )
+        hard_reasons = {
+            "task_contract_not_yet_valid",
+            "task_contract_expired",
+            "tool_not_allowed_by_task",
+            "resource_not_allowed_by_task",
+            "tool_capability_missing",
+            "capability_exact_argument_mismatch",
+            "capability_resource_not_allowed",
+            "capability_call_limit_exceeded",
+            "post_issue_constraint_missing",
+            "issue_repository_not_allowed",
+            "issue_target_not_allowed",
+            "issue_call_limit_exceeded",
+            "approval_invalid",
+        }
         return PolicyEvaluation(
             allowed=not reasons,
             reasons=tuple(reasons),
             requires_approval=requires_approval,
             matched_rule_ids=tuple(matched_rule_ids),
             untrusted_source_kinds=observed_untrusted,
+            hard_denial=any(reason in hard_reasons for reason in reasons),
         )

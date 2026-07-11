@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import cast
 
 from agent_antibody.contracts import PolicyMode
+from agent_antibody.core_types import tool_id
 from agent_antibody.demo import DemoReport, run_demo
+from agent_antibody.generic_runner import CaseRun
+from agent_antibody.portfolio_demo import run_portfolio_demo, run_target_demo
 from agent_antibody.recipes import (
     AntibodyBundle,
     RegressionRecipeGenerator,
@@ -17,6 +20,7 @@ from agent_antibody.recipes import (
 )
 from agent_antibody.runner import ScenarioRun, run_scenario
 from agent_antibody.scenarios import MALICIOUS_RUNBOOK
+from agent_antibody.targets.registry import TARGET_IDS
 
 
 def _run_row(label: str, run: ScenarioRun) -> str:
@@ -26,6 +30,33 @@ def _run_row(label: str, run: ScenarioRun) -> str:
     return (
         f"{label:<22} {run.mode.value:<8} {before} -> {after}  "
         f"{run.oracle.status.value:<10} issue={len(run.final_state.issues)}"
+    )
+
+
+def _case_run_row(label: str, run: CaseRun) -> str:
+    target_id = run.case.target_id
+    if target_id == "opsmate":
+        service = str(run.case.fixtures["service"])
+        before_replicas = cast(dict[str, object], run.initial_state["replicas"])[service]
+        after_replicas = cast(dict[str, object], run.final_state["replicas"])[service]
+        detail = f"replicas={before_replicas}->{after_replicas}"
+    elif target_id == "repomate":
+        before_files = cast(dict[str, object], run.initial_state["files"])
+        after_files = cast(dict[str, object], run.final_state["files"])
+        detail = (
+            f"README={'yes' if 'README.md' in before_files else 'no'}"
+            f"->{'yes' if 'README.md' in after_files else 'no'}"
+        )
+    else:
+        before_orders = cast(dict[str, object], run.initial_state["orders"])
+        after_orders = cast(dict[str, object], run.final_state["orders"])
+        order_id = str(run.case.fixtures["order_id"])
+        before_order = cast(dict[str, object], before_orders[order_id])
+        after_order = cast(dict[str, object], after_orders[order_id])
+        detail = f"refunded={before_order['refunded_cents']}->{after_order['refunded_cents']}c"
+    return (
+        f"{label:<22} {run.mode.value:<8} {target_id:<12} {detail:<24} "
+        f"{run.oracle.status.value:<10}"
     )
 
 
@@ -45,7 +76,7 @@ def _print_human(report: DemoReport, *, show_trace: bool, show_bundle: bool) -> 
     if show_trace:
         print("\nProtected attack trace")
         for event in report.protected.events:
-            tool = event.tool.value if event.tool else "-"
+            tool = tool_id(event.tool) if event.tool else "-"
             print(f"{event.sequence:02d} {event.event_type.value:<20} {tool}")
 
     if show_bundle:
@@ -75,6 +106,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     regression.add_argument("bundles", nargs="+", type=Path)
     regression.add_argument("--json", action="store_true", help="Print JSON results")
+
+    portfolio = subparsers.add_parser(
+        "portfolio",
+        help="Run deterministic security evaluations for the registered target agents",
+    )
+    portfolio.add_argument(
+        "--target",
+        choices=(*TARGET_IDS, "all"),
+        default="all",
+        help="Target agent to evaluate, or all targets (default: all)",
+    )
+    portfolio.add_argument("--json", action="store_true", help="Print JSON reports")
 
     probe = subparsers.add_parser(
         "probe",
@@ -111,6 +154,12 @@ def _build_parser() -> argparse.ArgumentParser:
     live.add_argument(
         "--model",
         help="Gemini model name; defaults to AGENT_ANTIBODY_MODEL",
+    )
+    live.add_argument(
+        "--target",
+        choices=TARGET_IDS,
+        default="opsmate",
+        help="Target agent to evaluate (default: opsmate)",
     )
     live.add_argument("--json", action="store_true", help="Print the complete JSON report")
     return parser
@@ -155,6 +204,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"{status:<4} {path} reasons={reasons}")
         return 0 if all(result.passed for _path, result in results) else 1
 
+    if args.command == "portfolio":
+        reports = (
+            run_portfolio_demo()
+            if args.target == "all"
+            else (run_target_demo(cast(str, args.target)),)
+        )
+        if args.json:
+            print(
+                json.dumps(
+                    [report.model_dump(mode="json") for report in reports],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            print("Agent Antibody target portfolio")
+            for report in reports:
+                print(f"\n{report.target.name}")
+                print(_case_run_row("deterministic / vulnerable", report.vulnerable))
+                print(_case_run_row("deterministic / protected", report.protected))
+                print(_case_run_row("deterministic / normal", report.normal))
+                print(f"Memory seed        {report.selected_attack.plan_id} (9 holdouts)")
+                metrics = report.suite_metrics
+                print(
+                    "Attack suite       "
+                    f"{metrics.success_before}/{metrics.total} -> "
+                    f"{metrics.success_after}/{metrics.total} "
+                    f"(confirmed blocks={metrics.confirmed_blocked})"
+                )
+                print(report.antibody.to_yaml().rstrip())
+        return 0 if all(report.acceptance_passed for report in reports) else 1
+
     if args.command == "probe":
         model = cast(str | None, args.model) or os.getenv("AGENT_ANTIBODY_MODEL")
         if not model:
@@ -187,7 +268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if event.event_type.value not in {"tool.requested", "policy.decision"}:
                         continue
                     effect = event.payload.get("effect", "-")
-                    tool = event.tool.value if event.tool else "-"
+                    tool = tool_id(event.tool) if event.tool else "-"
                     print(f"{event.sequence:02d} {event.event_type.value:<16} {tool:<20} {effect}")
         return 0 if run.oracle.status.value != "INVALID_RUN" else 1
 
@@ -197,15 +278,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("live requires --model or AGENT_ANTIBODY_MODEL")
         from agent_antibody.live_pipeline import LiveSecurityPipeline
 
-        report = LiveSecurityPipeline(model=model).run()
+        report = LiveSecurityPipeline(model=model, target_id=cast(str, args.target)).run()
         if args.json:
             print(json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2))
         else:
             print("Agent Antibody live Gemini pipeline")
-            print(f"Attack Agent       {report.selected_attack.plan_id}")
-            print(_run_row("live / vulnerable", report.vulnerable))
-            print(_run_row("live / protected", report.protected))
-            print(_run_row("live / normal", report.normal))
+            print(f"Memory seed        {report.selected_attack.plan_id} (9 holdouts)")
+            print(_case_run_row("live / vulnerable", report.vulnerable))
+            print(_case_run_row("live / protected", report.protected))
+            print(_case_run_row("live / normal", report.normal))
+            metrics = report.suite_metrics
+            print(
+                "Attack suite       "
+                f"{metrics.success_before}/{metrics.total} -> "
+                f"{metrics.success_after}/{metrics.total} "
+                f"(confirmed blocks={metrics.confirmed_blocked})"
+            )
             print(f"Antibody Agent     {report.antibody.bundle_id}")
             print(report.antibody.to_yaml().rstrip())
         return 0 if report.acceptance_passed else 1

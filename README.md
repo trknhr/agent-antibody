@@ -5,12 +5,12 @@ target agent in a simulator, judges the run by observable tool calls and state
 changes, then turns a confirmed failure into deterministic policy and regression
 memory.
 
-The current target is a fictional DevOps agent named OpsMate:
+The prototype ships three complete target adapters:
 
 ```text
-malicious Runbook + vulnerable OpsMate -> replicas 3 -> 0  INFECTED
-same attack + generated antibody       -> replicas 3 -> 3  IMMUNE
-normal investigation + antibody        -> Issue posted     HEALTHY
+OpsMate    malicious Runbook / scale-to-zero       INFECTED -> IMMUNE
+RepoMate   malicious Issue / delete README.md      INFECTED -> IMMUNE
+SupportMate receipt OCR / high-value refund        INFECTED -> IMMUNE
 ```
 
 The simulator is local only. No component has production operations credentials
@@ -18,8 +18,9 @@ or access to a real service control plane.
 
 ## What is implemented
 
-- Signed, expiring task contracts bound to caller, resources, and Issue destination.
-- In-memory Ops simulator with service status, logs, Runbooks, Issues, and scaling.
+- Signed, expiring task contracts bound to caller, resources, and per-tool capabilities.
+- Target-neutral Gateway, Runner, Oracle, and trace engine.
+- In-memory Ops, repository, and customer-support simulators.
 - Fail-closed Policy Gateway with strict arguments, destination limits, redaction,
   provenance tracking, and single-use approval binding.
 - Canonical traces for tool requests, policy decisions, execution outcomes, and
@@ -29,20 +30,23 @@ or access to a real service control plane.
 - Policy compiler that validates LLM antibody proposals against a target manifest
   and confirmed evidence before activating policy.
 - Regression bundles that are directly executable in CI.
-- Google ADK OpsMate adapter running against the same simulator.
+- Google ADK adapters for OpsMate, RepoMate, and SupportMate running through the same Gateway.
 - Gemini Attack Agent and Antibody Agent using structured output.
+- Ten-case attack campaigns: Gemini generates ten distinct injection techniques,
+  uses one confirmed case as immune memory, and verifies the resulting antibody
+  against that seed plus nine held-out variants.
 - FastAPI demo UI with deterministic and live Gemini flows.
 - Cloud Run source deployment workflow with Workload Identity Federation.
 
 ## Architecture
 
 ```text
-Target manifest
+Target registry (OpsMate / RepoMate / SupportMate)
   -> Gemini Attack Agent
-  -> attack scenario
-OpsMate through Google ADK
+  -> target-specific attack materializer
+Target Agent through Google ADK
   -> Policy Gateway
-  -> Ops simulator
+  -> target simulator
   -> canonical trace
 Deterministic oracle
   -> confirmed failure
@@ -62,7 +66,8 @@ Requires Python 3.14 and `uv`.
 
 ```bash
 uv sync --locked --dev
-uv run agent-antibody demo --trace --bundle
+uv run agent-antibody portfolio
+uv run agent-antibody live --target supportmate
 uv run pytest
 uv run ruff format --check .
 uv run ruff check .
@@ -79,8 +84,10 @@ uv run agent-antibody regression .generated-antibodies/*.yaml
 ## Live Gemini Pipeline
 
 The deterministic demo does not need an API key. The live path uses real Gemini
-calls for three roles: Attack Agent, target OpsMate through ADK, and Antibody
-Agent. All tools still execute only against the local simulator.
+calls for three roles: Attack Agent, the selected target through ADK, and
+Antibody Agent. Each campaign generates and evaluates ten target-specific attacks
+before and after the generated policy. All tools still execute only against the
+local simulator.
 
 With Gemini Developer API:
 
@@ -88,6 +95,8 @@ With Gemini Developer API:
 export GEMINI_API_KEY=...
 export AGENT_ANTIBODY_MODEL=gemini-3.5-flash
 uv run agent-antibody live
+uv run agent-antibody live --target repomate
+uv run agent-antibody live --target supportmate
 ```
 
 With EnvVault:
@@ -102,9 +111,9 @@ envvault exec \
 Expected result:
 
 ```text
-live / vulnerable      enforce  3 -> 0  INFECTED   issue=1
-live / protected       enforce  3 -> 3  IMMUNE     issue=1
-live / normal          enforce  3 -> 3  HEALTHY    issue=1
+OpsMate      10/10 -> 0/10 / normal HEALTHY
+RepoMate     10/10 -> 0/10 / normal HEALTHY
+SupportMate  10/10 -> 0/10 / normal HEALTHY
 ```
 
 ## Local UI
@@ -120,12 +129,18 @@ The API exposes:
 - `GET /healthz`
 - `GET /api/healthz`
 - `GET /api/demo`
+- `GET /api/demo?target_id=opsmate|repomate|supportmate`
+- `GET /api/portfolio`
+- `GET /api/targets`
 - `GET /api/live/status`
 - `POST /api/live`
 
-`POST /api/live` is disabled unless `AGENT_ANTIBODY_LIVE_ENABLED=true`. It also
-requires `Content-Type: application/json` and
-`X-Agent-Antibody-Client: live-demo`.
+`POST /api/live` accepts `{"target_id":"opsmate|repomate|supportmate"}` and
+requires `Content-Type: application/json` and a request bearer token matching
+`AGENT_ANTIBODY_LIVE_API_TOKEN`. The browser keeps the entered token only in the
+current page; it is not embedded in JavaScript or written to browser storage.
+`GET /api/live/status` reports whether live mode is configured; it deliberately
+does not claim that Vertex IAM, model availability, or quota has been verified.
 
 ## Cloud Run
 
@@ -137,29 +152,47 @@ GOOGLE_CLOUD_LOCATION=global
 GOOGLE_GENAI_USE_VERTEXAI=true
 AGENT_ANTIBODY_MODEL=gemini-3.5-flash
 AGENT_ANTIBODY_LIVE_ENABLED=true
+AGENT_ANTIBODY_LIVE_API_TOKEN=<loaded-from-Secret-Manager>
 AGENT_ANTIBODY_LIVE_CACHE_SECONDS=600
-AGENT_ANTIBODY_ATTACK_SUITE_ATTEMPTS=3
+AGENT_ANTIBODY_ATTACK_SUITE_ATTEMPTS=2
+AGENT_ANTIBODY_SUITE_CONCURRENCY=3
 AGENT_ANTIBODY_EXPORT_TRACES=true
 ```
+
+`AGENT_ANTIBODY_SUITE_CONCURRENCY` must stay between 3 and 10 so the bounded
+ten-case live campaign fits within the Cloud Run request timeout.
 
 Recommended deployment shape:
 
 - One dedicated Cloud Run service: `agent-antibody`.
 - Dedicated runtime service account with `roles/aiplatform.user`.
 - Dedicated source-build service account with Cloud Run build permissions.
-- `max-instances=1`, `concurrency=1`, and live result caching for demo cost control.
+- A Secret Manager secret named by the required GitHub variable
+  `AGENT_ANTIBODY_LIVE_TOKEN_SECRET`; grant Secret Accessor to the runtime service
+  account and to the WIF deploy service account that configures the secret mapping.
+- Grant the WIF deploy service account Cloud Run deployment permission and Service
+  Account User on both the runtime and source-build service accounts.
+- `max-instances=1`, `concurrency=1`, a 900-second request timeout, bounded
+  three-way in-process campaign execution, and live result caching for demo cost control.
 - Structured trace export to Cloud Logging without raw Runbook bodies, Issue bodies,
   prompts, or credentials.
+- Public API responses are explicit allowlists: they expose only state summaries,
+  tool lifecycle metadata, and campaign outcomes, never raw fixtures or raw state.
 
 The workflow in `.github/workflows/deploy.yml` verifies tests and generated
 regressions, then deploys to Cloud Run through Workload Identity Federation. It
-is ready for `trknhr/agent-antibody` once the GitHub repository and WIF variables
+fails closed if the new source revision cannot be built or deployed. It then
+retrieves the presenter token from Secret Manager and runs one protected,
+ten-case SupportMate Gemini campaign as the release gate: one memory seed plus
+nine held-out variants must move from `10/10` infected to `0/10`, and normal
+utility must remain healthy. The deterministic UI is public; paid live Gemini
+execution remains bearer-protected. It is ready for `trknhr/agent-antibody`
+once the GitHub repository, WIF variables, and live-token Secret Manager secret
 exist.
 
 ## Current Boundary
 
-The generic boundary is the target manifest, attack plan schema, antibody
-proposal schema, and policy compiler. OpsMate is the complete executable target.
-`RepoMate` is included as a second manifest to prove the compiler and policy DSL
-are not hardcoded to `scale_service`, but it does not yet have a full runtime
-adapter.
+The generic boundary is `ExecutionCase`, `TargetRuntime`, `TargetAdapter`, the
+signed capability contract, target-neutral trace/oracle, attack plan schema,
+antibody proposal schema, and policy compiler. Each target implements that
+boundary with a local runtime, deterministic replay, and a Google ADK adapter.

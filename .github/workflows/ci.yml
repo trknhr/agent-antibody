@@ -42,6 +42,7 @@ jobs:
 
       - name: Execute generated antibody regression
         run: |
+          uv run --locked agent-antibody portfolio
           uv run --locked agent-antibody demo --output .generated-antibodies
           uv run --locked agent-antibody regression .generated-antibodies/*.yaml
 

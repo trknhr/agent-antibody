@@ -4,6 +4,8 @@ import json
 import os
 
 from agent_antibody.contracts import EventType, JsonValue
+from agent_antibody.core_types import tool_id
+from agent_antibody.generic_runner import CaseRun
 from agent_antibody.runner import ScenarioRun
 
 
@@ -12,7 +14,7 @@ def trace_export_enabled() -> bool:
 
 
 def emit_run_trace(
-    run: ScenarioRun,
+    run: ScenarioRun | CaseRun,
     *,
     phase: str,
     target_id: str,
@@ -23,6 +25,7 @@ def emit_run_trace(
     if not trace_export_enabled():
         return
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    case_id = run.case.case_id if isinstance(run, CaseRun) else run.scenario.scenario_id
     for event in run.events:
         safe_details: dict[str, JsonValue] = {}
         if event.event_type == EventType.POLICY_DECISION:
@@ -49,13 +52,14 @@ def emit_run_trace(
             "message": f"Agent Antibody {phase}: {event.event_type.value}",
             "component": "agent-antibody",
             "target_id": target_id,
-            "scenario_id": run.scenario.scenario_id,
+            "scenario_id": case_id,
+            "case_id": case_id,
             "run_id": event.run_id,
             "phase": phase,
             "sequence": event.sequence,
             "event_type": event.event_type.value,
             "request_id": event.request_id,
-            "tool": event.tool.value if event.tool is not None else None,
+            "tool": tool_id(event.tool) if event.tool is not None else None,
             "policy_id": policy_id,
             "details": safe_details,
         }

@@ -15,8 +15,8 @@ from agent_antibody.contracts import (
     SignedApproval,
     SignedTaskContract,
     TaskContract,
-    ToolName,
 )
+from agent_antibody.core_types import ToolId
 
 _DIGEST: Final = hashlib.sha256
 
@@ -61,7 +61,7 @@ class ApprovalSigner:
         self,
         *,
         contract: TaskContract,
-        tool: ToolName,
+        tool: ToolId,
         arguments: dict[str, JsonValue],
         expires_at: datetime,
     ) -> SignedApproval:
@@ -79,7 +79,7 @@ class ApprovalSigner:
         approval: SignedApproval,
         *,
         contract: TaskContract,
-        tool: ToolName,
+        tool: ToolId,
         arguments: dict[str, JsonValue],
         now: datetime | None = None,
     ) -> bool:

@@ -9,7 +9,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from agent_antibody.agent import AgentAdapter
-from agent_antibody.contracts import EventType, PolicyMode, SourceKind, ToolName
+from agent_antibody.contracts import EventType, PolicyMode, ToolName
+from agent_antibody.core_types import SourceId
 from agent_antibody.oracle import FindingCode, OracleStatus
 from agent_antibody.policy import (
     PolicyAction,
@@ -36,7 +37,7 @@ class AntibodyBundle(BaseModel):
 
     bundle_id: str
     rules: tuple[ToolPolicyRule, ...]
-    untrusted_sources: tuple[SourceKind, ...]
+    untrusted_sources: tuple[SourceId, ...]
     regression: RegressionRecipe
 
     @classmethod

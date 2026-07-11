@@ -20,6 +20,7 @@
       button { border: 1px solid #8ff0c7; color: #07110e; background: #8ff0c7; padding: 12px 18px; font: inherit; cursor: pointer; }
       button.secondary { color: #8ff0c7; background: transparent; }
       button:disabled { cursor: wait; opacity: .55; }
+      input, select { border: 1px solid #2d3845; color: #ecf1f7; background: #080b0f; padding: 12px; font: inherit; }
       .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
       .runs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
       .card { border: 1px solid #2d3845; background: rgba(11, 15, 20, 0.86); padding: 20px; min-height: 210px; }
@@ -30,7 +31,16 @@
       dl { display: grid; grid-template-columns: 1fr auto; gap: 8px 14px; margin: 0; color: #b8c3ce; }
       dd { margin: 0; color: #fff; }
       .metrics { margin-top: 14px; border: 1px solid #2d3845; padding: 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-      .metric strong { display: block; font-size: 24px; margin-top: 8px; }
+      .metric strong { display: block; font-size: 20px; margin-top: 8px; white-space: nowrap; }
+      .suite { margin-top: 14px; border: 1px solid #2d3845; overflow-x: auto; }
+      .suite h2 { font-size: 16px; margin: 0; padding: 16px 20px; border-bottom: 1px solid #2d3845; }
+      table { width: 100%; border-collapse: collapse; min-width: 760px; }
+      th, td { padding: 12px 14px; border-bottom: 1px solid #202a35; text-align: left; vertical-align: top; }
+      th { color: #7f8c99; font-size: 12px; text-transform: uppercase; font-weight: 500; }
+      td { color: #b8c3ce; font-size: 13px; }
+      td.payload { max-width: 460px; white-space: pre-wrap; }
+      .badge { display: inline-block; min-width: 88px; font-weight: 700; }
+      .memory { color: #ffcf70; }
       pre { margin-top: 14px; border: 1px solid #2d3845; background: #080b0f; padding: 20px; overflow: auto; max-height: 300px; color: #aebbc8; }
       @media (max-width: 760px) { header { align-items: start; flex-direction: column; } .runs, .metrics { grid-template-columns: 1fr; } }
     </style>
@@ -40,41 +50,102 @@
       <header>
         <div><h1>Agent Antibody</h1><p>Attack the agent before production. Preserve confirmed failures as policy and regression memory.</p></div>
         <div class="actions">
+          <select id="target" aria-label="Target agent">
+            <option value="opsmate">OpsMate · availability</option>
+            <option value="repomate">RepoMate · repository</option>
+            <option value="supportmate">SupportMate · refunds</option>
+          </select>
+          <input id="live-token" type="password" autocomplete="off" placeholder="Live demo token" aria-label="Live demo token">
           <button class="secondary" id="run">Run deterministic</button>
           <button id="run-live" disabled>Run live Gemini</button>
         </div>
       </header>
       <section class="runs" id="runs" aria-live="polite"></section>
       <section class="metrics" id="metrics"></section>
+      <section class="suite" id="suite" hidden>
+        <h2>Attack suite</h2>
+        <table>
+          <thead><tr><th>#</th><th>Technique</th><th>Surface</th><th>Payload</th><th>Vulnerable</th><th>Protected</th><th>Seed / holdout</th></tr></thead>
+          <tbody id="suite-body"></tbody>
+        </table>
+      </section>
       <pre id="trace">Press “Run attack” to execute the deterministic security evaluation.</pre>
     </main>
     <script>
       const labels = { vulnerable: "Malicious / vulnerable", protected: "Malicious / protected", normal: "Normal / protected" };
       const runButton = document.querySelector("#run");
       const liveButton = document.querySelector("#run-live");
+      const liveToken = document.querySelector("#live-token");
+      const targetSelect = document.querySelector("#target");
       const runs = document.querySelector("#runs");
       const metrics = document.querySelector("#metrics");
+      const suite = document.querySelector("#suite");
+      const suiteBody = document.querySelector("#suite-body");
       const trace = document.querySelector("#trace");
+      let liveTimer = null;
       function card(key, run) {
-        const service = run.scenario.service;
-        const before = run.initial_state.replicas[service];
-        const after = run.final_state.replicas[service];
+        const summary = run.summary;
+        const primaryLabel = summary.primary_label;
+        const before = summary.before;
+        const after = summary.after;
+        const artifactLabel = summary.artifact_label;
+        const artifactCount = summary.artifact_count;
         const status = run.oracle.status.toLowerCase();
-        return `<article class="card"><small>${labels[key]}</small><div class="status ${status}">${run.oracle.status}</div><dl><dt>Policy</dt><dd>${run.mode}</dd><dt>Replicas</dt><dd>${before} → ${after}</dd><dt>Dangerous requests</dt><dd>${run.oracle.dangerous_request_count}</dd><dt>Issues</dt><dd>${run.final_state.issues.length}</dd></dl></article>`;
+        return `<article class="card"><small>${labels[key]}</small><div class="status ${status}">${run.oracle.status}</div><dl><dt>Policy</dt><dd>${run.mode}</dd><dt>${primaryLabel}</dt><dd>${before} → ${after}</dd><dt>Dangerous requests</dt><dd>${run.oracle.dangerous_request_count}</dd><dt>${artifactLabel}</dt><dd>${artifactCount}</dd></dl></article>`;
       }
       function setBusy(busy) {
         runButton.disabled = busy;
-        liveButton.disabled = busy || liveButton.dataset.enabled !== "true";
+        liveButton.disabled = busy || liveButton.dataset.enabled !== "true" || !liveToken.value;
+        targetSelect.disabled = busy;
+        liveToken.disabled = busy;
       }
+      function rate(success, total) {
+        const percent = total ? Math.round((success / total) * 100) : 0;
+        return `${success}/${total} (${percent}%)`;
+      }
+      function renderSuite(data) {
+        const cases = data.attack_cases || [];
+        suite.hidden = cases.length === 0;
+        suiteBody.replaceChildren();
+        cases.forEach((attack, index) => {
+          const row = document.createElement("tr");
+          const fields = [
+            String(index + 1),
+            String(attack.plan.technique || "variant"),
+            String(attack.plan.surface_id || "-"),
+            String(attack.plan.payload || ""),
+            String(attack.vulnerable_status || "-"),
+            String(attack.protected_status || "-"),
+            attack.memory_seed ? "SEED" : "HOLDOUT",
+          ];
+          fields.forEach((value, fieldIndex) => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            if (fieldIndex === 3) cell.className = "payload";
+            if (fieldIndex === 4) cell.classList.add(String(attack.vulnerable_status || "").toLowerCase());
+            if (fieldIndex === 5) cell.classList.add(String(attack.protected_status || "").toLowerCase());
+            if (fieldIndex === 6 && attack.memory_seed) cell.classList.add("memory");
+            row.appendChild(cell);
+          });
+          suiteBody.appendChild(row);
+        });
+      }
+      liveToken.addEventListener("input", () => {
+        if (!runButton.disabled) setBusy(false);
+      });
       function renderRuns(data, isLive) {
         runs.innerHTML = ["vulnerable", "protected", "normal"].map(key => card(key, data[key])).join("");
-        const before = data.vulnerable.oracle.attack_succeeded ? "1/1 (100%)" : "0/1 (0%)";
-        const after = data.protected.oracle.attack_succeeded ? "1/1 (100%)" : "0/1 (0%)";
-        const normal = data.normal.oracle.normal_task_succeeded ? "1/1 (100%)" : "0/1 (0%)";
-        metrics.innerHTML = `<div class="metric"><small>Attack success</small><strong>${before} → ${after}</strong></div><div class="metric"><small>Normal task</small><strong>${normal}</strong></div><div class="metric"><small>Status</small><strong>${data.vulnerable.oracle.status} → ${data.protected.oracle.status}</strong></div>`;
+        const campaign = data.suite_metrics;
+        const before = campaign ? rate(campaign.success_before, campaign.total) : (data.vulnerable.oracle.attack_succeeded ? "1/1 (100%)" : "0/1 (0%)");
+        const after = campaign ? rate(campaign.success_after, campaign.total) : (data.protected.oracle.attack_succeeded ? "1/1 (100%)" : "0/1 (0%)");
+        const normal = campaign ? rate(campaign.normal_success, 1) : (data.normal.oracle.normal_task_succeeded ? "1/1 (100%)" : "0/1 (0%)");
+        const status = campaign ? (data.acceptance_passed ? "IMMUNE" : "REVIEW REQUIRED") : `${data.vulnerable.oracle.status} → ${data.protected.oracle.status}`;
+        metrics.innerHTML = `<div class="metric"><small>Attack success</small><strong>${before} → ${after}</strong></div><div class="metric"><small>Normal task</small><strong>${normal}</strong></div><div class="metric"><small>Status</small><strong>${status}</strong></div>`;
+        renderSuite(data);
         if (isLive) {
           const policy = JSON.stringify(data.antibody.rules, null, 2);
-          trace.textContent = `LIVE GEMINI PIPELINE\n\nAttack Agent payload:\n${data.selected_attack.payload}\n\nAntibody Agent proposal:\n${policy}\n\nProtected trace:\n` + data.protected.events.map(event => `${String(event.sequence).padStart(2, "0")} ${event.event_type.padEnd(20)} ${event.tool || "-"}`).join("\n");
+          const campaignSummary = campaign ? `\n\nSuite: ${before} → ${after}; confirmed blocks ${campaign.confirmed_blocked}.` : "";
+          trace.textContent = `LIVE GEMINI PIPELINE\n\nRepresentative Attack Agent payload:\n${data.selected_attack.payload}${campaignSummary}\n\nAntibody Agent proposal:\n${policy}\n\nProtected trace:\n` + data.protected.events.map(event => `${String(event.sequence).padStart(2, "0")} ${event.event_type.padEnd(20)} ${event.tool || "-"}`).join("\n");
         } else {
           trace.textContent = data.protected.events.map(event => `${String(event.sequence).padStart(2, "0")} ${event.event_type.padEnd(20)} ${event.tool || "-"}`).join("\n");
         }
@@ -82,26 +153,33 @@
       runButton.addEventListener("click", async () => {
         setBusy(true); runButton.textContent = "Running…"; trace.textContent = "Executing deterministic attack and regression scenarios…";
         try {
-          const response = await fetch("/api/demo");
+          const response = await fetch(`/api/demo?target_id=${targetSelect.value}`);
           const data = await response.json();
           renderRuns(data, false);
         } catch (error) { trace.textContent = String(error); }
         finally { setBusy(false); runButton.textContent = "Run deterministic"; }
       });
       liveButton.addEventListener("click", async () => {
-        setBusy(true); liveButton.textContent = "Gemini running…"; trace.textContent = "Attack Agent is generating a target-specific attack. This can take about a minute…";
+        setBusy(true); liveButton.textContent = "Gemini running…";
+        const startedAt = Date.now();
+        const renderElapsed = () => {
+          const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+          trace.textContent = `Generating 10 target-specific attacks, then evaluating 10 vulnerable and 10 protected runs. Elapsed: ${elapsed}s.`;
+        };
+        renderElapsed();
+        liveTimer = window.setInterval(renderElapsed, 1000);
         try {
-          const response = await fetch("/api/live", { method: "POST", headers: { "Content-Type": "application/json", "X-Agent-Antibody-Client": "live-demo" }, body: "{}" });
+          const response = await fetch("/api/live", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${liveToken.value}` }, body: JSON.stringify({ target_id: targetSelect.value }) });
           const data = await response.json();
           if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
           renderRuns(data, true);
         } catch (error) { trace.textContent = String(error); }
-        finally { setBusy(false); liveButton.textContent = "Run live Gemini"; }
+        finally { if (liveTimer !== null) window.clearInterval(liveTimer); liveTimer = null; setBusy(false); liveButton.textContent = "Run live Gemini"; }
       });
       fetch("/api/live/status").then(response => response.json()).then(state => {
-        liveButton.dataset.enabled = String(state.enabled);
-        liveButton.disabled = !state.enabled;
-        liveButton.title = state.enabled ? `Model: ${state.model}` : "Live Gemini is disabled on this deployment";
+        liveButton.dataset.enabled = String(state.configured);
+        setBusy(false);
+        liveButton.title = state.configured ? `Model: ${state.model}` : "Live Gemini is disabled or not configured on this deployment";
       }).catch(() => {});
     </script>
   </body>

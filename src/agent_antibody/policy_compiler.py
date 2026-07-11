@@ -8,7 +8,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from agent_antibody.ai_models import AntibodyProposal, AttackEvidence, ObservedRequest
-from agent_antibody.contracts import JsonValue, SourceKind
+from agent_antibody.contracts import JsonValue
+from agent_antibody.core_types import SourceId
 from agent_antibody.manifests import TargetManifest
 from agent_antibody.policy import PolicyRules, RuleWhen, ToolPolicyRule
 
@@ -19,7 +20,7 @@ class CompiledAntibody(BaseModel):
     bundle_id: str
     target_id: str
     rules: tuple[ToolPolicyRule, ...]
-    untrusted_sources: tuple[SourceKind, ...]
+    untrusted_sources: tuple[SourceId, ...]
     rationale: str
 
     def policy(self) -> PolicyRules:
@@ -31,7 +32,7 @@ class CompiledAntibody(BaseModel):
             "bundle_id": self.bundle_id,
             "target_id": self.target_id,
             "rules": cast(list[JsonValue], dumped["rules"]),
-            "untrusted_sources": [source.value for source in self.untrusted_sources],
+            "untrusted_sources": list(self.untrusted_sources),
         }
         return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
@@ -48,10 +49,15 @@ class PolicyCompiler:
     ) -> CompiledAntibody:
         if proposal.target_id != manifest.target_id or evidence.target_id != manifest.target_id:
             raise ValueError("antibody target does not match evidence and manifest")
+        if evidence.oracle_status != "INFECTED":
+            raise ValueError("antibody compilation requires a confirmed infected run")
 
         evidence_by_id = {request.request_id: request for request in evidence.requests}
+        causal_request_ids = set(evidence.causal_request_ids)
+        if not causal_request_ids:
+            raise ValueError("antibody compilation requires causal state-change evidence")
         compiled_rules: list[ToolPolicyRule] = []
-        matched_state_change = False
+        covered_causal_request_ids: set[str] = set()
         for index, proposed in enumerate(proposal.rules, start=1):
             tool = manifest.tool(proposed.tool)
             if not tool.mutates_state:
@@ -76,15 +82,17 @@ class PolicyCompiler:
                 if request.tool != proposed.tool:
                     raise ValueError("antibody evidence tool does not match its rule")
                 cited_requests.append(request)
-
             when = RuleWhen(predicates=proposed.predicates)
-            if not any(when.matches(request.arguments) for request in cited_requests):
-                raise ValueError("antibody rule does not match its cited request arguments")
-            if any(
-                request.changed_state and when.matches(request.arguments)
+            causal_matches = [
+                request
                 for request in cited_requests
-            ):
-                matched_state_change = True
+                if request.request_id in causal_request_ids
+                and request.changed_state
+                and when.matches(request.arguments)
+            ]
+            if not causal_matches:
+                raise ValueError("antibody rule must match a cited causal state-changing request")
+            covered_causal_request_ids.update(request.request_id for request in causal_matches)
 
             semantic_rule = {
                 "target": manifest.target_id,
@@ -106,16 +114,15 @@ class PolicyCompiler:
                 )
             )
 
-        if not matched_state_change:
-            raise ValueError("no antibody rule matches a state-changing failure")
+        uncovered_request_ids = causal_request_ids.difference(covered_causal_request_ids)
+        if uncovered_request_ids:
+            raise ValueError("antibody rules do not cover every causal state-changing request")
 
         declared_sources = {surface.source_kind for surface in manifest.injection_surfaces}
         unknown_sources = set(proposal.untrusted_sources).difference(declared_sources)
         if unknown_sources:
             raise ValueError(f"antibody declares unknown untrusted sources: {unknown_sources}")
-        untrusted_sources = tuple(
-            sorted((SourceKind(source) for source in declared_sources), key=str)
-        )
+        untrusted_sources = tuple(sorted(declared_sources))
         bundle_semantics = {
             "target": manifest.target_id,
             "scenario": evidence.scenario_id,

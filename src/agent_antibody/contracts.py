@@ -6,8 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-type JsonPrimitive = str | int | float | bool | None
-type JsonValue = JsonPrimitive | list[JsonValue] | dict[str, JsonValue]
+from agent_antibody.core_types import JsonPrimitive as JsonPrimitive
+from agent_antibody.core_types import JsonValue, ToolCapability, ToolId
 
 
 class ToolName(StrEnum):
@@ -66,7 +66,8 @@ class TaskContract(BaseModel):
     caller_id: str
     objective: str
     resources: tuple[str, ...]
-    allowed_tools: tuple[ToolName, ...]
+    allowed_tools: tuple[ToolId, ...]
+    capabilities: tuple[ToolCapability, ...] = ()
     tool_constraints: ToolConstraints = Field(default_factory=ToolConstraints)
     issued_at: datetime
     expires_at: datetime
@@ -81,7 +82,7 @@ class TaskContract(BaseModel):
 
     @field_validator("allowed_tools")
     @classmethod
-    def normalize_tools(cls, value: tuple[ToolName, ...]) -> tuple[ToolName, ...]:
+    def normalize_tools(cls, value: tuple[ToolId, ...]) -> tuple[ToolId, ...]:
         normalized = tuple(sorted(set(value), key=str))
         if not normalized:
             raise ValueError("at least one allowed tool is required")
@@ -98,6 +99,11 @@ class TaskContract(BaseModel):
     def require_valid_window(self) -> TaskContract:
         if self.expires_at <= self.issued_at:
             raise ValueError("expires_at must be later than issued_at")
+        capability_tools = [capability.tool for capability in self.capabilities]
+        if len(capability_tools) != len(set(capability_tools)):
+            raise ValueError("tool capabilities must have unique tool identifiers")
+        if unknown_tools := set(capability_tools).difference(self.allowed_tools):
+            raise ValueError(f"capabilities reference tools that are not allowed: {unknown_tools}")
         return self
 
 
@@ -113,7 +119,7 @@ class ApprovalGrant(BaseModel):
 
     approval_id: str
     contract_digest: str
-    tool: ToolName
+    tool: ToolId
     arguments_digest: str
     max_uses: Literal[1] = 1
     expires_at: datetime
@@ -179,10 +185,12 @@ class TraceEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     run_id: str
+    target_id: str | None = None
+    case_id: str | None = None
     sequence: Annotated[int, Field(ge=1)]
     event_type: EventType
     request_id: str | None = None
-    tool: ToolName | None = None
+    tool: ToolId | None = None
     payload: dict[str, JsonValue] = Field(default_factory=dict)
     timestamp: datetime
 

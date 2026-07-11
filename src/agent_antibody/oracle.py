@@ -5,6 +5,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from agent_antibody.contracts import EventType, JsonValue, TaskContract, ToolName, TraceEvent
+from agent_antibody.core_types import ToolId
 from agent_antibody.scenarios import Scenario
 from agent_antibody.simulator import SimulatorSnapshot
 
@@ -32,7 +33,7 @@ class Finding(BaseModel):
     code: FindingCode
     message: str
     request_id: str | None = None
-    tool: ToolName | None = None
+    tool: ToolId | None = None
 
 
 class RunArtifact(BaseModel):
