@@ -1,0 +1,177 @@
+name: Agent Antibody Remediate
+
+on:
+  workflow_run:
+    workflows: ["Agent Antibody Candidate"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-immunity-pr:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Resolve and bind the source pull request
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          PR_NUMBER="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/source-pr.json"
+          HEAD_SHA="$(jq -r '.head.sha' "$RUNNER_TEMP/source-pr.json")"
+          HEAD_REF="$(jq -r '.head.ref' "$RUNNER_TEMP/source-pr.json")"
+          HEAD_REPOSITORY="$(jq -r '.head.repo.full_name // empty' "$RUNNER_TEMP/source-pr.json")"
+          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_SHA" != "$WORKFLOW_HEAD_SHA" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$HEAD_REF" == antibody/* ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git check-ref-format --branch "$HEAD_REF" >/dev/null
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Check out trusted control plane
+        if: steps.source.outputs.eligible == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: control-plane
+          persist-credentials: false
+
+      - name: Check out candidate tree without executing it
+        if: steps.source.outputs.eligible == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.source.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Download data-only candidate evaluation
+        if: steps.source.outputs.eligible == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: antibody-candidate-evaluation
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: candidate-artifact
+
+      - name: Validate artifact binding before trusted apply
+        if: steps.source.outputs.eligible == 'true'
+        env:
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+        run: |
+          EVALUATION=candidate-artifact/evaluation.json
+          test -f "$EVALUATION"
+          test "$(wc -c < "$EVALUATION")" -le 1048576
+          test "$(jq -r '.source_revision' "$EVALUATION")" = "$HEAD_SHA"
+          jq -e '.schema_version == 1 and (.candidates | type == "array")' "$EVALUATION" >/dev/null
+
+      - name: Install trusted control-plane dependencies
+        if: steps.source.outputs.eligible == 'true'
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+          python-version: "3.14.5"
+          enable-cache: true
+
+      - name: Apply only validated immunity files
+        if: steps.source.outputs.eligible == 'true'
+        env:
+          PR_NUMBER: ${{ steps.source.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+          HEAD_REF: ${{ steps.source.outputs.head_ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+        working-directory: control-plane
+        run: |
+          uv sync --locked --dev
+          BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
+          uv run --locked agent-antibody immunity apply \
+            --evaluation "$GITHUB_WORKSPACE/candidate-artifact/evaluation.json" \
+            --repository-root "$GITHUB_WORKSPACE/candidate" \
+            --lifecycle-state verified_pending_review \
+            --source-pr-number "$PR_NUMBER" \
+            --source-pr-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR_NUMBER" \
+            --remediation-branch "$BRANCH" \
+            --workflow-run-url "$RUN_URL"
+
+      - name: Create stacked immunity pull request
+        id: create_immunity_pr
+        if: steps.source.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.source.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+          HEAD_REF: ${{ steps.source.outputs.head_ref }}
+        run: |
+          BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
+          cd candidate
+          git switch --create "$BRANCH"
+          git add -- immunities/v1
+          if git diff --cached --quiet; then
+            echo "No new immutable immunity memory was needed."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --cached --name-only | grep -Ev '^immunities/v1/(snapshot\.json|[a-z][a-z0-9-]*/imm-[a-z][a-z0-9-]*-[0-9a-f]{20}\.yaml)$' | grep -q .; then
+            echo "Refusing to commit paths outside immutable immunity storage" >&2
+            exit 1
+          fi
+          git -c core.hooksPath=/dev/null config user.name "agent-antibody[bot]"
+          git -c core.hooksPath=/dev/null config user.email "agent-antibody[bot]@users.noreply.github.com"
+          git -c core.hooksPath=/dev/null commit -m "chore(immunity): add generated regression memory"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          PR_URL="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --base "$HEAD_REF" --state open --json url --jq '.[0].url')"
+          if [ -z "$PR_URL" ]; then
+            PR_URL="$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$HEAD_REF" --head "$BRANCH" --draft --title "chore(immunity): add Agent Antibody regression memory" --body "Generated from source PR #${PR_NUMBER} at ${HEAD_SHA}.\n\nThis stacked PR contains only immutable policy-and-regression memory. Review it before merging into the source branch.")"
+          fi
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Link the immutable snapshot to the generated pull request
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.create_immunity_pr.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.source.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+          PR_URL: ${{ steps.create_immunity_pr.outputs.pr_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+        working-directory: control-plane
+        run: |
+          test -n "$PR_URL"
+          BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
+          uv run --locked agent-antibody immunity apply \
+            --evaluation "$GITHUB_WORKSPACE/candidate-artifact/evaluation.json" \
+            --repository-root "$GITHUB_WORKSPACE/candidate" \
+            --lifecycle-state verified_pending_review \
+            --source-pr-number "$PR_NUMBER" \
+            --source-pr-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR_NUMBER" \
+            --remediation-branch "$BRANCH" \
+            --remediation-pr-url "$PR_URL" \
+            --workflow-run-url "$RUN_URL" \
+            --refresh-snapshot
+          cd "$GITHUB_WORKSPACE/candidate"
+          git add -- immunities/v1/snapshot.json
+          if ! git diff --cached --quiet; then
+            git -c core.hooksPath=/dev/null commit -m "chore(immunity): link generated pull request"
+            git push origin "HEAD:refs/heads/$BRANCH"
+          fi

@@ -1,0 +1,100 @@
+name: Agent Antibody Candidate
+
+on:
+  pull_request:
+    paths:
+      - "src/agent_antibody/targets/**"
+      - "src/agent_antibody/adk_adapter.py"
+      - "src/agent_antibody/agent.py"
+      - "src/agent_antibody/ai_agents.py"
+      - "src/agent_antibody/ai_models.py"
+      - "src/agent_antibody/attack_campaign.py"
+      - "src/agent_antibody/contracts.py"
+      - "src/agent_antibody/core_types.py"
+      - "src/agent_antibody/gateway.py"
+      - "src/agent_antibody/generic_*.py"
+      - "src/agent_antibody/manifests.py"
+      - "src/agent_antibody/oracle.py"
+      - "src/agent_antibody/policy*.py"
+      - "src/agent_antibody/runner.py"
+      - "src/agent_antibody/scenarios.py"
+      - "src/agent_antibody/signing.py"
+      - "src/agent_antibody/simulator.py"
+      - "src/agent_antibody/tools.py"
+      - "src/agent_antibody/trace.py"
+      - "policies/**"
+      - "scenarios/**"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target to evaluate"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - opsmate
+          - repomate
+          - supportmate
+
+permissions:
+  contents: read
+
+concurrency:
+  group: antibody-candidate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    if: >-
+      github.event_name != 'pull_request' ||
+      !startsWith(github.event.pull_request.head.ref, 'antibody/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out candidate without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+          python-version: "3.14.5"
+          enable-cache: false
+
+      - name: Prepare changed-path input
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files.txt"
+          else
+            git ls-files src/agent_antibody > "$RUNNER_TEMP/changed-files.txt"
+          fi
+
+      - name: Evaluate candidate with read-only credentials
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          TARGET: ${{ github.event.inputs.target || 'auto' }}
+        run: |
+          uv sync --locked --dev
+          uv run --locked agent-antibody immunity evaluate \
+            --repository-root . \
+            --source-revision "$HEAD_SHA" \
+            --changed-files "$RUNNER_TEMP/changed-files.txt" \
+            --target "$TARGET" \
+            --output "$RUNNER_TEMP/evaluation.json"
+          jq '{source_revision, targets: [.candidates[] | {target_id: .artifact.target_id, artifact_id: .artifact.artifact_id, action}], requires_remediation: ([.candidates[] | select(.action == "create")] | length > 0)}' "$RUNNER_TEMP/evaluation.json"
+
+      - name: Upload data-only candidate evaluation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: antibody-candidate-evaluation
+          path: ${{ runner.temp }}/evaluation.json
+          if-no-files-found: error
+          retention-days: 1

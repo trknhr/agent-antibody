@@ -5,12 +5,19 @@ import json
 import os
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from agent_antibody.contracts import PolicyMode
 from agent_antibody.core_types import tool_id
 from agent_antibody.demo import DemoReport, run_demo
 from agent_antibody.generic_runner import CaseRun
+from agent_antibody.immunity_artifacts import (
+    SnapshotLifecycle,
+    apply_evaluation,
+    evaluate_repository,
+    load_artifacts,
+    verify_artifact,
+)
 from agent_antibody.portfolio_demo import run_portfolio_demo, run_target_demo
 from agent_antibody.recipes import (
     AntibodyBundle,
@@ -162,6 +169,73 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Target agent to evaluate (default: opsmate)",
     )
     live.add_argument("--json", action="store_true", help="Print the complete JSON report")
+
+    immunity = subparsers.add_parser(
+        "immunity",
+        help="Capture, verify, and apply immutable policy-and-regression memory",
+    )
+    immunity_subparsers = immunity.add_subparsers(dest="immunity_command", required=True)
+    evaluate = immunity_subparsers.add_parser(
+        "evaluate",
+        help="Evaluate changed target agents and write a data-only candidate artifact",
+    )
+    evaluate.add_argument(
+        "--repository-root",
+        type=Path,
+        default=Path("."),
+        help="Repository root containing the candidate checkout (default: .)",
+    )
+    evaluate.add_argument(
+        "--source-revision",
+        required=True,
+        help="Candidate git SHA used to bind immutable immunity memory",
+    )
+    evaluate.add_argument(
+        "--changed-files",
+        type=Path,
+        help="Newline-delimited repository-relative paths; defaults to no selected targets",
+    )
+    evaluate.add_argument(
+        "--target",
+        choices=(*TARGET_IDS, "all", "auto"),
+        default="auto",
+        help="Override changed-path selection (default: auto)",
+    )
+    evaluate.add_argument("--output", type=Path, required=True)
+
+    apply = immunity_subparsers.add_parser(
+        "apply",
+        help="Validate a candidate artifact and write only immutable immunity files",
+    )
+    apply.add_argument("--evaluation", type=Path, required=True)
+    apply.add_argument("--repository-root", type=Path, default=Path("."))
+    apply.add_argument(
+        "--lifecycle-state",
+        choices=("baseline", "verified_pending_review", "release_ready"),
+        default="verified_pending_review",
+    )
+    apply.add_argument("--source-pr-number", type=int)
+    apply.add_argument("--source-pr-url")
+    apply.add_argument("--remediation-branch")
+    apply.add_argument("--remediation-pr-url")
+    apply.add_argument("--workflow-run-url")
+    apply.add_argument(
+        "--refresh-snapshot",
+        action="store_true",
+        help="Rewrite only the allowlisted snapshot after a generated PR URL is known",
+    )
+
+    verify = immunity_subparsers.add_parser(
+        "verify",
+        help="Replay all persisted immunity memory against the current target adapters",
+    )
+    verify.add_argument("--repository-root", type=Path, default=Path("."))
+    verify.add_argument(
+        "--target",
+        choices=(*TARGET_IDS, "all"),
+        default="all",
+    )
+    verify.add_argument("--json", action="store_true")
     return parser
 
 
@@ -297,5 +371,106 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Antibody Agent     {report.antibody.bundle_id}")
             print(report.antibody.to_yaml().rstrip())
         return 0 if report.acceptance_passed else 1
+
+    if args.command == "immunity":
+        immunity_command = cast(str, args.immunity_command)
+        if immunity_command == "evaluate":
+            changed_files_path = cast(Path | None, args.changed_files)
+            changed_paths = (
+                tuple(
+                    line.strip()
+                    for line in changed_files_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+                if changed_files_path is not None
+                else ()
+            )
+            selected = cast(str, args.target)
+            target_ids = (
+                TARGET_IDS if selected == "all" else (selected,) if selected != "auto" else None
+            )
+            evaluation = evaluate_repository(
+                repository_root=cast(Path, args.repository_root),
+                source_revision=cast(str, args.source_revision),
+                changed_paths=changed_paths,
+                target_ids=target_ids,
+            )
+            output = cast(Path, args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(evaluation.to_json(), encoding="utf-8")
+            print(
+                json.dumps(
+                    {
+                        "output": str(output),
+                        "source_revision": evaluation.source_revision,
+                        "targets": [
+                            {
+                                "target_id": candidate.artifact.target_id,
+                                "artifact_id": candidate.artifact.artifact_id,
+                                "action": candidate.action,
+                            }
+                            for candidate in evaluation.candidates
+                        ],
+                        "requires_remediation": evaluation.requires_remediation,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+
+        if immunity_command == "apply":
+            from agent_antibody.immunity_artifacts import ImmunityEvaluation
+
+            evaluation = ImmunityEvaluation.from_json(
+                cast(Path, args.evaluation).read_text(encoding="utf-8")
+            )
+            lifecycle = SnapshotLifecycle(
+                state=cast(
+                    Literal["baseline", "verified_pending_review", "release_ready"],
+                    args.lifecycle_state,
+                ),
+                source_pr_number=cast(int | None, args.source_pr_number),
+                source_pr_url=cast(str | None, args.source_pr_url),
+                remediation_branch=cast(str | None, args.remediation_branch),
+                remediation_pr_url=cast(str | None, args.remediation_pr_url),
+                workflow_run_url=cast(str | None, args.workflow_run_url),
+            )
+            written = apply_evaluation(
+                evaluation,
+                repository_root=cast(Path, args.repository_root),
+                lifecycle=lifecycle,
+                refresh_snapshot=cast(bool, args.refresh_snapshot),
+            )
+            print(json.dumps({"written": [str(path) for path in written]}, ensure_ascii=False))
+            return 0
+
+        if immunity_command == "verify":
+            selected = cast(str, args.target)
+            artifacts = load_artifacts(
+                repository_root=cast(Path, args.repository_root),
+                target_id=None if selected == "all" else selected,
+            )
+            verification_results = tuple(verify_artifact(artifact) for artifact in artifacts)
+            if args.json:
+                print(
+                    json.dumps(
+                        [result.model_dump(mode="json") for result in verification_results],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                for result in verification_results:
+                    status = "PASS" if result.passed else "FAIL"
+                    reasons = ",".join(result.reasons) if result.reasons else "-"
+                    print(
+                        f"{status:<4} {result.target_id:<12} {result.artifact_id} "
+                        f"blocks={result.blocked_attacks}/{result.attack_count} reasons={reasons}"
+                    )
+            return (
+                0
+                if verification_results and all(result.passed for result in verification_results)
+                else 1
+            )
 
     return 2

@@ -483,6 +483,9 @@ class RepoMateAdapter:
     def normal_cases(self) -> tuple[ExecutionCase, ...]:
         return (NORMAL_REPOMATE_CASE,)
 
+    def create_replay_agent(self) -> TargetAgent:
+        return ReplayRepoMate()
+
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return RepoRuntime(case)
 

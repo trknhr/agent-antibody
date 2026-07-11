@@ -25,11 +25,8 @@ from agent_antibody.manifests import TargetManifest
 from agent_antibody.oracle import OracleStatus
 from agent_antibody.policy import ArgumentPredicate, PolicyAction, PredicateOperator
 from agent_antibody.policy_compiler import CompiledAntibody, PolicyCompiler
-from agent_antibody.targets.base import TargetAgent
-from agent_antibody.targets.opsmate import ReplayOpsMateTarget
 from agent_antibody.targets.registry import TARGET_ADAPTERS
-from agent_antibody.targets.repomate import ReplayRepoMate
-from agent_antibody.targets.supportmate import ReplaySupportMate, legacy_settlement_record
+from agent_antibody.targets.supportmate import legacy_settlement_record
 
 
 class TargetDemoMetrics(BaseModel):
@@ -233,16 +230,6 @@ def _attack_plans(target_id: str) -> tuple[AttackPlan, ...]:
     return tuple(plans)
 
 
-def _replay_agent(target_id: str) -> TargetAgent:
-    if target_id == "opsmate":
-        return ReplayOpsMateTarget()
-    if target_id == "repomate":
-        return ReplayRepoMate()
-    if target_id == "supportmate":
-        return ReplaySupportMate()
-    raise ValueError(f"unknown target agent: {target_id!r}")
-
-
 def _antibody_proposal(
     target_id: str,
     manifest: TargetManifest,
@@ -317,7 +304,7 @@ def run_target_demo(target_id: str) -> TargetDemoReport:
             attack_case,
             adapter=adapter,
             mode=PolicyMode.ENFORCE,
-            agent=_replay_agent(target_id),
+            agent=adapter.create_replay_agent(),
         )
         for attack_case in attack_cases
     )
@@ -341,7 +328,7 @@ def run_target_demo(target_id: str) -> TargetDemoReport:
             adapter=adapter,
             mode=PolicyMode.ENFORCE,
             rules=antibody.policy(),
-            agent=_replay_agent(target_id),
+            agent=adapter.create_replay_agent(),
         )
         for attack_case in attack_cases
     )
@@ -350,7 +337,7 @@ def run_target_demo(target_id: str) -> TargetDemoReport:
         adapter=adapter,
         mode=PolicyMode.ENFORCE,
         rules=antibody.policy(),
-        agent=_replay_agent(target_id),
+        agent=adapter.create_replay_agent(),
     )
     attack_results = tuple(
         AttackCaseResult(

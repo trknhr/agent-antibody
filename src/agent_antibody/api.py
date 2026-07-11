@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from importlib.resources import files
+from pathlib import Path
 from secrets import compare_digest
 from typing import Annotated, Literal, cast
 
@@ -14,12 +15,14 @@ from agent_antibody.attack_campaign import AttackCaseResult
 from agent_antibody.contracts import TraceEvent
 from agent_antibody.core_types import JsonObject, JsonValue
 from agent_antibody.generic_runner import CaseRun
+from agent_antibody.immunity_artifacts import load_snapshot
 from agent_antibody.live_pipeline import LivePipelineError, LivePipelineReport
 from agent_antibody.live_service import LiveDemoBusyError, LiveDemoState, live_demo_service
 from agent_antibody.portfolio_demo import TargetDemoReport, run_target_demo
 from agent_antibody.targets.registry import TARGET_ADAPTERS
 
 app = FastAPI(title="Agent Antibody", version="0.1.0")
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 _PUBLIC_SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key|password|token)\s*[=:]\s*\S+"),
@@ -253,6 +256,21 @@ def demo(target_id: Literal["opsmate", "repomate", "supportmate"] = "opsmate") -
 @app.get("/api/portfolio")
 def portfolio() -> list[JsonObject]:
     return [public_live_report(_cached_target_demo(target_id)) for target_id in TARGET_ADAPTERS]
+
+
+@app.get("/api/immunity-snapshot")
+def immunity_snapshot() -> JsonObject:
+    """Read the committed CI artifact; never generate or expose a live run here."""
+
+    try:
+        snapshot = load_snapshot(repository_root=_REPOSITORY_ROOT)
+    except FileNotFoundError as error:
+        raise HTTPException(
+            status_code=503, detail="immunity snapshot has not been generated"
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=503, detail="immunity snapshot is invalid") from error
+    return cast(JsonObject, snapshot.model_dump(mode="json"))
 
 
 @app.get("/api/live/status")

@@ -335,6 +335,9 @@ class OpsMateAdapter:
     def normal_cases(self) -> tuple[ExecutionCase, ...]:
         return (NORMAL_OPSMATE_CASE,)
 
+    def create_replay_agent(self) -> TargetAgent:
+        return ReplayOpsMateTarget()
+
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return OpsRuntime(case)
 

@@ -3,184 +3,601 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent Antibody</title>
+    <meta name="description" content="Read-only CI immunity dashboard for tool-using AI agents." />
+    <title>Agent Antibody · CI Immunity Dashboard</title>
     <style>
       :root {
         color-scheme: dark;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        background: #07090c;
-        color: #ecf1f7;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        background: #070a0d;
+        color: #e8eef5;
+        --ink: #e8eef5;
+        --muted: #94a2b2;
+        --line: #2b3744;
+        --panel: rgba(13, 18, 24, 0.9);
+        --panel-strong: #0b1016;
+        --mint: #9bf0cb;
+        --mint-dim: #4c8d77;
+        --amber: #ffd071;
+        --rose: #ff7288;
       }
+
       * { box-sizing: border-box; }
-      body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 80% 20%, #1e2936, #07090c 45%); }
-      main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; padding: 56px 0; }
-      header { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 32px; }
-      h1 { margin: 0; font-size: clamp(34px, 6vw, 72px); letter-spacing: -0.06em; }
-      header p { color: #9aa8b7; max-width: 520px; line-height: 1.6; }
-      button { border: 1px solid #8ff0c7; color: #07110e; background: #8ff0c7; padding: 12px 18px; font: inherit; cursor: pointer; }
-      button.secondary { color: #8ff0c7; background: transparent; }
-      button:disabled { cursor: wait; opacity: .55; }
-      input, select { border: 1px solid #2d3845; color: #ecf1f7; background: #080b0f; padding: 12px; font: inherit; }
-      .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
-      .runs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-      .card { border: 1px solid #2d3845; background: rgba(11, 15, 20, 0.86); padding: 20px; min-height: 210px; }
-      .card small { color: #7f8c99; text-transform: uppercase; }
-      .status { font-size: 30px; margin: 34px 0 16px; }
-      .infected { color: #ff647c; }
-      .immune, .healthy { color: #8ff0c7; }
-      dl { display: grid; grid-template-columns: 1fr auto; gap: 8px 14px; margin: 0; color: #b8c3ce; }
-      dd { margin: 0; color: #fff; }
-      .metrics { margin-top: 14px; border: 1px solid #2d3845; padding: 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-      .metric strong { display: block; font-size: 20px; margin-top: 8px; white-space: nowrap; }
-      .suite { margin-top: 14px; border: 1px solid #2d3845; overflow-x: auto; }
-      .suite h2 { font-size: 16px; margin: 0; padding: 16px 20px; border-bottom: 1px solid #2d3845; }
-      table { width: 100%; border-collapse: collapse; min-width: 760px; }
-      th, td { padding: 12px 14px; border-bottom: 1px solid #202a35; text-align: left; vertical-align: top; }
-      th { color: #7f8c99; font-size: 12px; text-transform: uppercase; font-weight: 500; }
-      td { color: #b8c3ce; font-size: 13px; }
-      td.payload { max-width: 460px; white-space: pre-wrap; }
-      .badge { display: inline-block; min-width: 88px; font-weight: 700; }
-      .memory { color: #ffcf70; }
-      pre { margin-top: 14px; border: 1px solid #2d3845; background: #080b0f; padding: 20px; overflow: auto; max-height: 300px; color: #aebbc8; }
-      @media (max-width: 760px) { header { align-items: start; flex-direction: column; } .runs, .metrics { grid-template-columns: 1fr; } }
+
+      body {
+        min-width: 320px;
+        margin: 0;
+        background:
+          radial-gradient(circle at 84% 0%, rgba(58, 100, 119, 0.32), transparent 28rem),
+          radial-gradient(circle at 8% 20%, rgba(42, 83, 73, 0.2), transparent 34rem),
+          #070a0d;
+      }
+
+      a { color: var(--mint); }
+
+      main {
+        width: min(1240px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 42px 0 64px;
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        color: var(--mint);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+        gap: 32px;
+        align-items: end;
+        margin-bottom: 28px;
+      }
+
+      h1, h2, h3, p { margin-top: 0; }
+
+      h1 {
+        max-width: 680px;
+        margin-bottom: 16px;
+        font-size: clamp(42px, 7vw, 82px);
+        line-height: 0.92;
+        letter-spacing: -0.075em;
+      }
+
+      h2 {
+        margin-bottom: 8px;
+        font-size: 18px;
+        letter-spacing: -0.03em;
+      }
+
+      h3 {
+        margin-bottom: 8px;
+        font-size: 15px;
+      }
+
+      .lede {
+        max-width: 650px;
+        margin-bottom: 0;
+        color: #b8c4d0;
+        font-size: 16px;
+        line-height: 1.65;
+      }
+
+      .snapshot-stamp,
+      .panel,
+      .metric,
+      .target-card,
+      .flow-step {
+        border: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .snapshot-stamp { padding: 20px; }
+
+      .stamp-label,
+      .panel-kicker,
+      .metric small,
+      .flow-step small,
+      .field-label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+
+      .snapshot-state {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 11px 0 14px;
+        color: var(--mint);
+        font-size: 28px;
+        font-weight: 800;
+        letter-spacing: -0.06em;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: currentColor;
+        box-shadow: 0 0 20px currentColor;
+      }
+
+      .stamp-meta { color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+      .notice {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        margin-bottom: 14px;
+        border: 1px solid #355d50;
+        background: rgba(17, 46, 39, 0.38);
+        padding: 13px 16px;
+        color: #bfd4cb;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .notice strong { color: var(--mint); }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+        margin: 14px 0 28px;
+      }
+
+      .metric { min-height: 138px; padding: 20px; }
+
+      .metric strong {
+        display: block;
+        margin-top: 14px;
+        color: var(--mint);
+        font-size: clamp(30px, 4vw, 48px);
+        line-height: 0.9;
+        letter-spacing: -0.08em;
+      }
+
+      .metric p { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+
+      .panel { padding: 22px; }
+
+      .section-head {
+        display: flex;
+        gap: 20px;
+        align-items: end;
+        justify-content: space-between;
+        margin-bottom: 18px;
+      }
+
+      .section-head p { max-width: 620px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(130px, 1fr));
+        gap: 10px;
+      }
+
+      .flow-step {
+        position: relative;
+        min-height: 118px;
+        padding: 16px;
+      }
+
+      .flow-step:not(:last-child)::after {
+        position: absolute;
+        top: 50%;
+        right: -8px;
+        z-index: 1;
+        width: 14px;
+        height: 1px;
+        background: var(--mint-dim);
+        content: "";
+      }
+
+      .flow-step strong { display: block; margin-top: 11px; font-size: 14px; line-height: 1.25; }
+      .flow-step span { display: block; margin-top: 9px; color: var(--mint); font-size: 12px; }
+
+      .lifecycle-meta {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .meta-item { min-width: 0; border-top: 1px solid var(--line); padding-top: 12px; }
+      .meta-item .field-label { display: block; margin-bottom: 6px; }
+      .meta-value { overflow-wrap: anywhere; color: #dce4ed; font-size: 13px; line-height: 1.45; }
+
+      .inventory { margin-top: 28px; }
+
+      .target-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      details.target-card { min-width: 0; }
+      summary {
+        display: block;
+        cursor: pointer;
+        list-style: none;
+        padding: 20px;
+      }
+      summary::-webkit-details-marker { display: none; }
+      summary::after {
+        float: right;
+        color: var(--mint);
+        content: "+";
+        font-size: 19px;
+      }
+      details[open] summary { border-bottom: 1px solid var(--line); }
+      details[open] summary::after { content: "−"; }
+
+      .target-name { margin: 7px 0 15px; font-size: 24px; letter-spacing: -0.06em; }
+      .target-summary { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+      .target-status { color: var(--mint); font-weight: 800; }
+
+      .target-detail { padding: 20px; }
+      .facts { display: grid; gap: 13px; margin: 0; }
+      .fact { border-bottom: 1px solid rgba(43, 55, 68, 0.7); padding-bottom: 11px; }
+      .fact:last-child { border-bottom: 0; padding-bottom: 0; }
+      .fact dt { margin-bottom: 5px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+      .fact dd { margin: 0; color: #dbe4ec; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+      .rule-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+      .rule-list li { border-left: 2px solid var(--mint-dim); padding-left: 9px; }
+      .memory-row { display: flex; flex-wrap: wrap; gap: 7px; }
+      .badge { border: 1px solid #496a5e; padding: 3px 6px; color: var(--mint); font-size: 11px; font-weight: 700; }
+      .badge.amber { border-color: #7e693b; color: var(--amber); }
+
+      .empty {
+        border: 1px dashed var(--line);
+        padding: 28px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      footer {
+        margin-top: 28px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      @media (max-width: 980px) {
+        header { grid-template-columns: 1fr; }
+        .flow { grid-template-columns: repeat(3, 1fr); }
+        .flow-step:nth-child(3)::after { display: none; }
+        .lifecycle-meta { grid-template-columns: repeat(2, 1fr); }
+        .target-grid { grid-template-columns: 1fr; }
+      }
+
+      @media (max-width: 640px) {
+        main { width: min(100% - 24px, 1240px); padding-top: 28px; }
+        .metrics, .flow, .lifecycle-meta { grid-template-columns: 1fr; }
+        .flow-step:not(:last-child)::after { display: none; }
+        .section-head { align-items: flex-start; flex-direction: column; }
+      }
     </style>
   </head>
   <body>
     <main>
       <header>
-        <div><h1>Agent Antibody</h1><p>Attack the agent before production. Preserve confirmed failures as policy and regression memory.</p></div>
-        <div class="actions">
-          <select id="target" aria-label="Target agent">
-            <option value="opsmate">OpsMate · availability</option>
-            <option value="repomate">RepoMate · repository</option>
-            <option value="supportmate">SupportMate · refunds</option>
-          </select>
-          <input id="live-token" type="password" autocomplete="off" placeholder="Live demo token" aria-label="Live demo token">
-          <button class="secondary" id="run">Run deterministic</button>
-          <button id="run-live" disabled>Run live Gemini</button>
+        <div>
+          <p class="eyebrow">Security CI for tool-using agents</p>
+          <h1>Agent<br />Antibody</h1>
+          <p class="lede">
+            Every agent change is challenged before release. Confirmed unsafe tool execution becomes
+            an approval policy and a regression memory; the browser only shows the resulting CI state.
+          </p>
         </div>
+        <aside class="snapshot-stamp" aria-live="polite">
+          <span class="stamp-label">Current immunity snapshot</span>
+          <div class="snapshot-state" id="snapshot-state"><span class="status-dot"></span>LOADING</div>
+          <div class="stamp-meta" id="snapshot-meta">Reading the latest generated CI artifact…</div>
+        </aside>
       </header>
-      <section class="runs" id="runs" aria-live="polite"></section>
-      <section class="metrics" id="metrics"></section>
-      <section class="suite" id="suite" hidden>
-        <h2>Attack suite</h2>
-        <table>
-          <thead><tr><th>#</th><th>Technique</th><th>Surface</th><th>Payload</th><th>Vulnerable</th><th>Protected</th><th>Seed / holdout</th></tr></thead>
-          <tbody id="suite-body"></tbody>
-        </table>
+
+      <section class="notice" aria-label="Dashboard boundary">
+        <strong>READ-ONLY</strong>
+        <span>No model call, tool call, policy change, or GitHub mutation can be triggered from this page.</span>
       </section>
-      <pre id="trace">Press “Run attack” to execute the deterministic security evaluation.</pre>
+
+      <section class="metrics" aria-label="Current immunity totals">
+        <article class="metric">
+          <small>Protected agents</small>
+          <strong id="protected-agents">—</strong>
+          <p>Targets with zero successful attacks and a healthy normal task.</p>
+        </article>
+        <article class="metric">
+          <small>Attack variants blocked</small>
+          <strong id="blocked-attacks">—</strong>
+          <p>Confirmed policy blocks in the latest immunity memories.</p>
+        </article>
+        <article class="metric">
+          <small>Normal tasks healthy</small>
+          <strong id="healthy-tasks">—</strong>
+          <p>Useful agent behavior retained after protection was applied.</p>
+        </article>
+      </section>
+
+      <section class="panel" aria-labelledby="lifecycle-title">
+        <div class="section-head">
+          <div>
+            <p class="panel-kicker">How immunity is maintained</p>
+            <h2 id="lifecycle-title">An agent change starts a verification loop</h2>
+          </div>
+          <p>Gemini proposes attacks and antibodies. Tool traces, policy decisions, and simulator state changes decide whether the result is accepted.</p>
+        </div>
+        <div class="flow" aria-label="Agent Antibody CI lifecycle">
+          <article class="flow-step"><small>01</small><strong>Agent PR changes</strong><span>observed</span></article>
+          <article class="flow-step"><small>02</small><strong>Attack suite generated</strong><span>target-specific</span></article>
+          <article class="flow-step"><small>03</small><strong>Tool trace evaluated</strong><span>deterministic oracle</span></article>
+          <article class="flow-step"><small>04</small><strong>Policy + test formed</strong><span>immune memory</span></article>
+          <article class="flow-step"><small>05</small><strong>Antibody PR opened</strong><span>reviewable change</span></article>
+          <article class="flow-step"><small>06</small><strong>Release gate checks</strong><span>safe + useful</span></article>
+        </div>
+        <div class="lifecycle-meta" id="lifecycle-meta" aria-live="polite"></div>
+      </section>
+
+      <section class="inventory" aria-labelledby="inventory-title">
+        <div class="section-head">
+          <div>
+            <p class="panel-kicker">Current immune inventory</p>
+            <h2 id="inventory-title">Policies and regression memories by target</h2>
+          </div>
+          <p>Each target preserves one confirmed failure as a memory seed and validates it against held-out attack variants.</p>
+        </div>
+        <div class="target-grid" id="target-grid" aria-live="polite">
+          <div class="empty">Loading the latest target snapshots…</div>
+        </div>
+      </section>
+
+      <footer>
+        This dashboard renders a generated, allowlisted CI artifact. It never exposes raw prompts,
+        untrusted document bodies, simulator state, credentials, or agent replies.
+      </footer>
     </main>
+
     <script>
-      const labels = { vulnerable: "Malicious / vulnerable", protected: "Malicious / protected", normal: "Normal / protected" };
-      const runButton = document.querySelector("#run");
-      const liveButton = document.querySelector("#run-live");
-      const liveToken = document.querySelector("#live-token");
-      const targetSelect = document.querySelector("#target");
-      const runs = document.querySelector("#runs");
-      const metrics = document.querySelector("#metrics");
-      const suite = document.querySelector("#suite");
-      const suiteBody = document.querySelector("#suite-body");
-      const trace = document.querySelector("#trace");
-      let liveTimer = null;
-      function card(key, run) {
-        const summary = run.summary;
-        const primaryLabel = summary.primary_label;
-        const before = summary.before;
-        const after = summary.after;
-        const artifactLabel = summary.artifact_label;
-        const artifactCount = summary.artifact_count;
-        const status = run.oracle.status.toLowerCase();
-        return `<article class="card"><small>${labels[key]}</small><div class="status ${status}">${run.oracle.status}</div><dl><dt>Policy</dt><dd>${run.mode}</dd><dt>${primaryLabel}</dt><dd>${before} → ${after}</dd><dt>Dangerous requests</dt><dd>${run.oracle.dangerous_request_count}</dd><dt>${artifactLabel}</dt><dd>${artifactCount}</dd></dl></article>`;
+      const snapshotState = document.querySelector("#snapshot-state");
+      const snapshotMeta = document.querySelector("#snapshot-meta");
+      const protectedAgents = document.querySelector("#protected-agents");
+      const blockedAttacks = document.querySelector("#blocked-attacks");
+      const healthyTasks = document.querySelector("#healthy-tasks");
+      const lifecycleMeta = document.querySelector("#lifecycle-meta");
+      const targetGrid = document.querySelector("#target-grid");
+
+      function text(value, fallback = "—") {
+        if (value === null || value === undefined || value === "") return fallback;
+        return String(value);
       }
-      function setBusy(busy) {
-        runButton.disabled = busy;
-        liveButton.disabled = busy || liveButton.dataset.enabled !== "true" || !liveToken.value;
-        targetSelect.disabled = busy;
-        liveToken.disabled = busy;
+
+      function integer(value) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : 0;
       }
-      function rate(success, total) {
-        const percent = total ? Math.round((success / total) * 100) : 0;
-        return `${success}/${total} (${percent}%)`;
+
+      function list(value) {
+        return Array.isArray(value) ? value : [];
       }
-      function renderSuite(data) {
-        const cases = data.attack_cases || [];
-        suite.hidden = cases.length === 0;
-        suiteBody.replaceChildren();
-        cases.forEach((attack, index) => {
-          const row = document.createElement("tr");
-          const fields = [
-            String(index + 1),
-            String(attack.plan.technique || "variant"),
-            String(attack.plan.surface_id || "-"),
-            String(attack.plan.payload || ""),
-            String(attack.vulnerable_status || "-"),
-            String(attack.protected_status || "-"),
-            attack.memory_seed ? "SEED" : "HOLDOUT",
-          ];
-          fields.forEach((value, fieldIndex) => {
-            const cell = document.createElement("td");
-            cell.textContent = value;
-            if (fieldIndex === 3) cell.className = "payload";
-            if (fieldIndex === 4) cell.classList.add(String(attack.vulnerable_status || "").toLowerCase());
-            if (fieldIndex === 5) cell.classList.add(String(attack.protected_status || "").toLowerCase());
-            if (fieldIndex === 6 && attack.memory_seed) cell.classList.add("memory");
-            row.appendChild(cell);
-          });
-          suiteBody.appendChild(row);
-        });
+
+      function object(value) {
+        return value && typeof value === "object" && !Array.isArray(value) ? value : {};
       }
-      liveToken.addEventListener("input", () => {
-        if (!runButton.disabled) setBusy(false);
-      });
-      function renderRuns(data, isLive) {
-        runs.innerHTML = ["vulnerable", "protected", "normal"].map(key => card(key, data[key])).join("");
-        const campaign = data.suite_metrics;
-        const before = campaign ? rate(campaign.success_before, campaign.total) : (data.vulnerable.oracle.attack_succeeded ? "1/1 (100%)" : "0/1 (0%)");
-        const after = campaign ? rate(campaign.success_after, campaign.total) : (data.protected.oracle.attack_succeeded ? "1/1 (100%)" : "0/1 (0%)");
-        const normal = campaign ? rate(campaign.normal_success, 1) : (data.normal.oracle.normal_task_succeeded ? "1/1 (100%)" : "0/1 (0%)");
-        const status = campaign ? (data.acceptance_passed ? "IMMUNE" : "REVIEW REQUIRED") : `${data.vulnerable.oracle.status} → ${data.protected.oracle.status}`;
-        metrics.innerHTML = `<div class="metric"><small>Attack success</small><strong>${before} → ${after}</strong></div><div class="metric"><small>Normal task</small><strong>${normal}</strong></div><div class="metric"><small>Status</small><strong>${status}</strong></div>`;
-        renderSuite(data);
-        if (isLive) {
-          const policy = JSON.stringify(data.antibody.rules, null, 2);
-          const campaignSummary = campaign ? `\n\nSuite: ${before} → ${after}; confirmed blocks ${campaign.confirmed_blocked}.` : "";
-          trace.textContent = `LIVE GEMINI PIPELINE\n\nRepresentative Attack Agent payload:\n${data.selected_attack.payload}${campaignSummary}\n\nAntibody Agent proposal:\n${policy}\n\nProtected trace:\n` + data.protected.events.map(event => `${String(event.sequence).padStart(2, "0")} ${event.event_type.padEnd(20)} ${event.tool || "-"}`).join("\n");
-        } else {
-          trace.textContent = data.protected.events.map(event => `${String(event.sequence).padStart(2, "0")} ${event.event_type.padEnd(20)} ${event.tool || "-"}`).join("\n");
+
+      function node(tagName, className, value) {
+        const element = document.createElement(tagName);
+        if (className) element.className = className;
+        if (value !== undefined) element.textContent = text(value);
+        return element;
+      }
+
+      function appendMeta(parent, label, value) {
+        const item = node("div", "meta-item");
+        item.append(node("span", "field-label", label));
+        item.append(node("div", "meta-value", value));
+        parent.append(item);
+      }
+
+      function safeUrl(value) {
+        if (typeof value !== "string" || value.length === 0) return null;
+        try {
+          const url = new URL(value, window.location.origin);
+          return url.protocol === "https:" ? url.href : null;
+        } catch (_) {
+          return null;
         }
       }
-      runButton.addEventListener("click", async () => {
-        setBusy(true); runButton.textContent = "Running…"; trace.textContent = "Executing deterministic attack and regression scenarios…";
-        try {
-          const response = await fetch(`/api/demo?target_id=${targetSelect.value}`);
-          const data = await response.json();
-          renderRuns(data, false);
-        } catch (error) { trace.textContent = String(error); }
-        finally { setBusy(false); runButton.textContent = "Run deterministic"; }
-      });
-      liveButton.addEventListener("click", async () => {
-        setBusy(true); liveButton.textContent = "Gemini running…";
-        const startedAt = Date.now();
-        const renderElapsed = () => {
-          const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-          trace.textContent = `Generating 10 target-specific attacks, then evaluating 10 vulnerable and 10 protected runs. Elapsed: ${elapsed}s.`;
-        };
-        renderElapsed();
-        liveTimer = window.setInterval(renderElapsed, 1000);
-        try {
-          const response = await fetch("/api/live", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${liveToken.value}` }, body: JSON.stringify({ target_id: targetSelect.value }) });
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-          renderRuns(data, true);
-        } catch (error) { trace.textContent = String(error); }
-        finally { if (liveTimer !== null) window.clearInterval(liveTimer); liveTimer = null; setBusy(false); liveButton.textContent = "Run live Gemini"; }
-      });
-      fetch("/api/live/status").then(response => response.json()).then(state => {
-        liveButton.dataset.enabled = String(state.configured);
-        setBusy(false);
-        liveButton.title = state.configured ? `Model: ${state.model}` : "Live Gemini is disabled or not configured on this deployment";
-      }).catch(() => {});
+
+      function appendLinkedMeta(parent, label, value, url) {
+        const item = node("div", "meta-item");
+        item.append(node("span", "field-label", label));
+        const href = safeUrl(url);
+        if (!href) {
+          item.append(node("div", "meta-value", value));
+        } else {
+          const link = node("a", "meta-value", value);
+          link.href = href;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          item.append(link);
+        }
+        parent.append(item);
+      }
+
+      function metricsFor(target) {
+        return object(object(target).suite_metrics);
+      }
+
+      function isImmune(target) {
+        const metrics = metricsFor(target);
+        const total = integer(metrics.total);
+        return total > 0 && integer(metrics.success_after) === 0 &&
+          integer(metrics.confirmed_blocked) >= total && integer(metrics.normal_success) > 0;
+      }
+
+      function targetRules(value) {
+        const values = Array.isArray(value) ? value : value ? [value] : [];
+        return values.map((rule) => {
+          if (typeof rule === "string") return rule;
+          const source = object(rule);
+          const tool = text(source.tool || source.rule_id, "Policy rule");
+          const action = text(source.action, "enforce");
+          return `${tool} · ${action}`;
+        });
+      }
+
+      function targetTools(value) {
+        const values = Array.isArray(value) ? value : value ? [value] : [];
+        return values.map((tool) => {
+          if (typeof tool === "string") return tool;
+          return text(object(tool).name, "unknown tool");
+        });
+      }
+
+      function appendFact(facts, label, content) {
+        const fact = node("div", "fact");
+        const term = node("dt", "", label);
+        const definition = node("dd");
+        if (typeof content === "string") {
+          definition.textContent = content;
+        } else {
+          definition.append(content);
+        }
+        fact.append(term, definition);
+        facts.append(fact);
+      }
+
+      function targetCard(target, index) {
+        const metrics = metricsFor(target);
+        const memory = object(target.latest_memory);
+        const seed = object(memory.memory_seed);
+        const immune = isImmune(target);
+        const card = node("details", "target-card");
+        if (index === 0) card.open = true;
+
+        const summary = node("summary");
+        summary.append(node("div", "panel-kicker", text(target.target_id, "target")));
+        summary.append(node("h3", "target-name", text(target.name, "Unnamed agent")));
+        const result = node("div", "target-summary");
+        result.append(node("span", "", `${integer(metrics.success_before)}/${integer(metrics.total)} → ${integer(metrics.success_after)}/${integer(metrics.total)}`));
+        result.append(node("span", "target-status", immune ? "IMMUNE" : "REVIEW"));
+        summary.append(result);
+
+        const detail = node("div", "target-detail");
+        const facts = node("dl", "facts");
+        const tools = targetTools(target.dangerous_tools);
+        appendFact(facts, "Dangerous tools", tools.length ? tools.join(", ") : "—");
+
+        const rules = targetRules(target.rules);
+        const ruleList = node("ul", "rule-list");
+        if (rules.length) {
+          rules.forEach((rule) => ruleList.append(node("li", "", rule)));
+        } else {
+          ruleList.append(node("li", "", "No generated policy rule recorded"));
+        }
+        appendFact(facts, "Active antibody policy", ruleList);
+
+        appendFact(
+          facts,
+          "Attack campaign",
+          `${integer(metrics.success_before)}/${integer(metrics.total)} infected → ${integer(metrics.success_after)}/${integer(metrics.total)} after policy; ${integer(metrics.confirmed_blocked)} confirmed blocks`,
+        );
+        appendFact(
+          facts,
+          "Normal utility",
+          integer(metrics.normal_success) > 0 ? "HEALTHY" : "REVIEW REQUIRED",
+        );
+
+        appendFact(facts, "Stored immunity memories", `${integer(target.memory_count)} active`);
+        const memoryRow = node("div", "memory-row");
+        memoryRow.append(
+          node(
+            "span",
+            "badge amber",
+            `MEMORY SEED · ${text(seed.plan_id, text(seed.technique, "recorded"))}`,
+          ),
+        );
+        memoryRow.append(node("span", "badge", `${integer(memory.holdout_count)} HELD-OUT VARIANTS`));
+        appendFact(facts, "Regression memory", memoryRow);
+        appendFact(facts, "Memory artifact", text(memory.artifact_id));
+        appendFact(facts, "Generated", text(memory.generated_at));
+        detail.append(facts);
+        card.append(summary, detail);
+        return card;
+      }
+
+      function renderLifecycle(lifecycle) {
+        const value = object(lifecycle);
+        lifecycleMeta.replaceChildren();
+        appendMeta(lifecycleMeta, "Snapshot state", text(value.state, "UNKNOWN"));
+        const sourcePr = value.source_pr_number === null || value.source_pr_number === undefined
+          ? "No source pull request recorded"
+          : `Source PR #${text(value.source_pr_number)}`;
+        appendLinkedMeta(lifecycleMeta, "Source change", sourcePr, value.source_pr_url);
+        appendMeta(lifecycleMeta, "Remediation branch", text(value.remediation_branch));
+        appendLinkedMeta(
+          lifecycleMeta,
+          "Antibody pull request",
+          value.remediation_pr_url ? "Open generated PR" : "Not generated",
+          value.remediation_pr_url,
+        );
+        appendLinkedMeta(lifecycleMeta, "Verification run", "Open CI workflow", value.workflow_run_url);
+      }
+
+      function render(snapshot) {
+        const targets = list(snapshot.targets);
+        const immuneTargets = targets.filter(isImmune);
+        const blocked = targets.reduce((total, target) => total + integer(metricsFor(target).confirmed_blocked), 0);
+        const healthy = targets.filter((target) => integer(metricsFor(target).normal_success) > 0).length;
+        const lifecycle = object(snapshot.lifecycle);
+        const state = text(lifecycle.state, "SNAPSHOT READY").toUpperCase();
+
+        snapshotState.replaceChildren(node("span", "status-dot"), document.createTextNode(state));
+        snapshotMeta.textContent = `${text(snapshot.source_revision)} · generated ${text(snapshot.generated_at)}`;
+        protectedAgents.textContent = String(immuneTargets.length);
+        blockedAttacks.textContent = String(blocked);
+        healthyTasks.textContent = String(healthy);
+        renderLifecycle(lifecycle);
+
+        targetGrid.replaceChildren();
+        if (targets.length === 0) {
+          targetGrid.append(node("div", "empty", "No target immunity records are present in this snapshot."));
+          return;
+        }
+        targets.forEach((target, index) => targetGrid.append(targetCard(object(target), index)));
+      }
+
+      function renderFailure(error) {
+        const message = error instanceof Error ? error.message : String(error);
+        snapshotState.replaceChildren(node("span", "status-dot"), document.createTextNode("SNAPSHOT UNAVAILABLE"));
+        snapshotState.style.color = "var(--amber)";
+        snapshotMeta.textContent = "The generated CI artifact could not be read.";
+        protectedAgents.textContent = "—";
+        blockedAttacks.textContent = "—";
+        healthyTasks.textContent = "—";
+        lifecycleMeta.replaceChildren();
+        appendMeta(lifecycleMeta, "Status", "Read-only dashboard waiting for a CI snapshot");
+        targetGrid.replaceChildren(node("div", "empty", `Snapshot unavailable: ${text(message, "unknown error")}`));
+      }
+
+      fetch("/api/immunity-snapshot", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      })
+        .then((response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
+        .then(render)
+        .catch(renderFailure);
     </script>
   </body>
 </html>

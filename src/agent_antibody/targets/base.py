@@ -50,6 +50,11 @@ class TargetAdapter(Protocol):
 
     def normal_cases(self) -> tuple[ExecutionCase, ...]: ...
 
+    def create_replay_agent(self) -> TargetAgent:
+        """Return the deterministic target behavior used for persisted regressions."""
+
+        ...
+
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime: ...
 
     def create_agent(

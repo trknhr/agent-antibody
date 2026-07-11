@@ -317,6 +317,9 @@ class FakeAdapter:
     def normal_cases(self) -> tuple[ExecutionCase, ...]:
         return (_case(attack=False),)
 
+    def create_replay_agent(self) -> TargetAgent:
+        return VulnerableAgent()
+
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return FakeRuntime(case)
 

@@ -1066,6 +1066,9 @@ class SupportMateAdapter:
     def normal_cases(self) -> tuple[ExecutionCase, ...]:
         return (AUTHORIZED_REFUND,)
 
+    def create_replay_agent(self) -> TargetAgent:
+        return ReplaySupportMate()
+
     def create_runtime(self, case: ExecutionCase) -> TargetRuntime:
         return SupportRuntime(case)
 

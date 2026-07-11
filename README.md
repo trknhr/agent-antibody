@@ -37,6 +37,11 @@ or access to a real service control plane.
   against that seed plus nine held-out variants.
 - Target-owned attack payload contracts, so generated tool arguments are checked
   against the exact untrusted document grammar each vulnerable adapter consumes.
+- Immutable immunity artifacts: a policy, one memory seed, and nine held-out
+  regression variants are committed together under `immunities/v1/`.
+- A two-stage GitHub workflow that detects agent changes, produces data-only
+  candidate evidence, and opens a stacked draft immunity PR for same-repository
+  pull requests.
 - FastAPI demo UI with deterministic and live Gemini flows.
 - Cloud Run source deployment workflow with Workload Identity Federation.
 
@@ -70,6 +75,7 @@ Requires Python 3.14 and `uv`.
 uv sync --locked --dev
 uv run agent-antibody portfolio
 uv run agent-antibody live --target supportmate
+uv run agent-antibody immunity verify --repository-root .
 uv run pytest
 uv run ruff format --check .
 uv run ruff check .
@@ -126,6 +132,10 @@ uv run uvicorn agent_antibody.api:app --reload
 
 Open `http://127.0.0.1:8000`.
 
+The page at `/` is a read-only CI immunity dashboard. It reads the committed
+allowlisted snapshot at `immunities/v1/snapshot.json`; it cannot call a model,
+run a tool, change policy, or create a GitHub PR from a browser.
+
 The API exposes:
 
 - `GET /healthz`
@@ -134,6 +144,7 @@ The API exposes:
 - `GET /api/demo?target_id=opsmate|repomate|supportmate`
 - `GET /api/portfolio`
 - `GET /api/targets`
+- `GET /api/immunity-snapshot`
 - `GET /api/live/status`
 - `POST /api/live`
 
@@ -143,6 +154,59 @@ requires `Content-Type: application/json` and a request bearer token matching
 current page; it is not embedded in JavaScript or written to browser storage.
 `GET /api/live/status` reports whether live mode is configured; it deliberately
 does not claim that Vertex IAM, model availability, or quota has been verified.
+
+## Immunity CI and generated PRs
+
+Each confirmed attack becomes an additive, content-addressed file:
+
+```text
+immunities/v1/<target_id>/imm-<content-digest>.yaml
+```
+
+The file contains the bounded policy DSL and ten replayable attacks, but omits
+agent replies, tool output, raw simulator state, contracts, and LLM rationale.
+`agent-antibody immunity verify --repository-root .` replays every persisted
+memory against the current target adapter and verifies that all ten attacks are
+blocked by a policy rule while normal utility remains healthy.
+
+The GitHub flow is intentionally split at the trust boundary:
+
+```text
+Agent PR (read-only candidate workflow)
+  -> data-only evaluation artifact
+  -> trusted remediation workflow
+  -> antibody/pr-<source-pr>-<sha> stacked draft PR
+  -> review + merge into the source PR
+  -> Cloud Run live Gemini release gate
+```
+
+`Agent Antibody Candidate` executes candidate code with only `contents: read`,
+no secrets, no cache, and no write token. `Agent Antibody Remediate` runs only
+trusted default-branch control-plane code, validates the typed artifact, writes
+only `immunities/v1/**`, and opens a draft PR whose base is the original PR
+branch. Fork PRs never receive an automatic write/PR; they keep the read-only
+candidate result. The GitHub-only candidate result is a draft-remediation aid,
+not a release gate: the existing Cloud Run live Gemini gate remains the release
+authority until a fixed external sandbox harness is configured.
+
+For a local dry run:
+
+```bash
+REVISION="$(git rev-parse HEAD)"
+printf '%s\n' src/agent_antibody/targets/supportmate.py > /tmp/changed-files.txt
+uv run agent-antibody immunity evaluate \
+  --repository-root . \
+  --source-revision "$REVISION" \
+  --changed-files /tmp/changed-files.txt \
+  --output /tmp/antibody-evaluation.json
+uv run agent-antibody immunity apply \
+  --evaluation /tmp/antibody-evaluation.json \
+  --repository-root .
+```
+
+The CLI never pushes, opens a PR, or deploys. Those side effects are limited to
+the reviewed GitHub workflow with explicit `contents: write` and
+`pull-requests: write` permissions.
 
 ## Cloud Run
 

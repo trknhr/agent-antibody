@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from pathlib import Path
 from typing import cast
 
 from fastapi.testclient import TestClient
@@ -8,6 +9,12 @@ from pytest import MonkeyPatch
 
 from agent_antibody import api
 from agent_antibody.api import app
+from agent_antibody.immunity_artifacts import (
+    CandidateImmunity,
+    ImmunityArtifact,
+    ImmunityEvaluation,
+    apply_evaluation,
+)
 from agent_antibody.portfolio_demo import run_target_demo
 
 client = TestClient(app)
@@ -85,9 +92,41 @@ def test_index() -> None:
 
     assert response.status_code == 200
     assert "Agent Antibody" in response.text
-    assert "SupportMate · refunds" in response.text
-    assert "Attack suite" in response.text
-    assert "Generating 10 target-specific attacks" in response.text
+    assert "CI Immunity Dashboard" in response.text
+    assert "An agent change starts a verification loop" in response.text
+    assert "/api/immunity-snapshot" in response.text
+    assert "Run live Gemini" not in response.text
+
+
+def test_immunity_snapshot_endpoint_reads_only_allowlisted_artifact(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision="a" * 40,
+    )
+    evaluation = ImmunityEvaluation(
+        source_revision="a" * 40,
+        changed_paths=("src/agent_antibody/targets/supportmate.py",),
+        evaluated_at=artifact.captured_at,
+        candidates=(CandidateImmunity(action="create", artifact=artifact),),
+    )
+    apply_evaluation(evaluation, repository_root=tmp_path)
+    monkeypatch.setattr(api, "_REPOSITORY_ROOT", tmp_path)
+
+    response = cast(
+        Response,
+        client.get("/api/immunity-snapshot"),  # pyright: ignore[reportUnknownMemberType]
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["targets"][0]["target_id"] == "supportmate"
+    serialized = response.text
+    assert "payload" not in serialized
+    assert "agent_result" not in serialized
+    assert "attachment_text" not in serialized
 
 
 def test_live_endpoint_is_disabled_and_requires_json() -> None:
