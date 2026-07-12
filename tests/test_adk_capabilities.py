@@ -349,3 +349,55 @@ def test_extraction_accepts_matching_real_registry() -> None:
     )
 
     assert tuple(tool.name for tool in snapshot.tools) == ("read_customer",)
+
+
+def test_extraction_normalizes_vertex_generic_response_schema() -> None:
+    input_schema: JsonObject = {
+        "type": "object",
+        "properties": {"customer_id": {"type": "string"}},
+        "required": ["customer_id"],
+    }
+    plain = types.FunctionDeclaration(
+        name="read_customer",
+        description="Read customer.",
+        parameters_json_schema=input_schema,
+    )
+    vertex = types.FunctionDeclaration(
+        name="read_customer",
+        description="Read customer.",
+        parameters_json_schema=input_schema,
+        response_json_schema={"type": "object", "additionalProperties": True},
+    )
+    registry: dict[str, BaseTool] = {"read_customer": FunctionTool(read_customer)}
+
+    plain_snapshot = capability_snapshot_from_request(
+        _request_with_declarations([plain], registry=registry),
+        agent_name="support_mate",
+        adk_version="2.4.0",
+    )
+    vertex_snapshot = capability_snapshot_from_request(
+        _request_with_declarations([vertex], registry=registry),
+        agent_name="support_mate",
+        adk_version="2.4.0",
+    )
+
+    assert vertex_snapshot == plain_snapshot
+
+
+def test_extraction_rejects_specific_response_schema() -> None:
+    declaration = types.FunctionDeclaration(
+        name="read_customer",
+        description="Read customer.",
+        parameters_json_schema={"type": "object", "properties": {}},
+        response_json_schema={
+            "type": "object",
+            "properties": {"customer_id": {"type": "string"}},
+        },
+    )
+
+    with pytest.raises(CapabilityExtractionError, match="unsupported response schema"):
+        capability_snapshot_from_request(
+            _request_with_declarations([declaration]),
+            agent_name="support_mate",
+            adk_version="2.4.0",
+        )

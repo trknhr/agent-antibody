@@ -33,6 +33,10 @@ _CAPTURE_MODEL_NAME = "agent-antibody-adk-capability-capture"
 _ADK_SCHEMA_WARNING = (
     r"\[EXPERIMENTAL\] feature FeatureName\.JSON_SCHEMA_FOR_FUNC_DECL is enabled\."
 )
+_VERTEX_GENERIC_RESPONSE_JSON_SCHEMA: JsonObject = {
+    "additionalProperties": True,
+    "type": "object",
+}
 
 # A credential-free capture response intentionally has no provider token usage.
 logging.getLogger("google_adk.google.adk.telemetry._metrics").setLevel(logging.ERROR)
@@ -135,13 +139,22 @@ def _reject_unsupported_tool_fields(tool: types.Tool) -> None:
 
 
 def _reject_unsupported_function_fields(declaration: types.FunctionDeclaration) -> None:
-    supported = {"name", "description", "parameters", "parameters_json_schema"}
+    supported = {
+        "name",
+        "description",
+        "parameters",
+        "parameters_json_schema",
+        "response_json_schema",
+    }
     populated = set(declaration.model_dump(mode="json", exclude_none=True)).difference(supported)
     if populated:
         fields = ", ".join(sorted(populated))
         raise CapabilityExtractionError(
             f"unsupported fields on tool {declaration.name!r}: {fields}"
         )
+    response_schema = declaration.response_json_schema
+    if response_schema is not None and response_schema != _VERTEX_GENERIC_RESPONSE_JSON_SCHEMA:
+        raise CapabilityExtractionError(f"unsupported response schema on tool {declaration.name!r}")
 
 
 def capability_snapshot_from_request(
