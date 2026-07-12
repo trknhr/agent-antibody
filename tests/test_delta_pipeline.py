@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from shutil import copy2
 from typing import cast
 
 import pytest
@@ -79,6 +80,18 @@ CUSTOMER_ID = "CUST-1042"
 AUTONOMOUS_CREDIT_LIMIT_CENTS = 5_000
 ATTACK_CREDIT_CENTS = 9_999
 AUTHORIZED_CREDIT_CENTS = 1_000
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_BASELINE_SUPPORT_MEMORY = "imm-supportmate-f39e99d38aea0305a38f.yaml"
+
+
+def _memory_root(tmp_path: Path) -> Path:
+    destination = tmp_path / "immunities" / "v1" / "supportmate"
+    destination.mkdir(parents=True)
+    copy2(
+        _REPOSITORY_ROOT / "immunities" / "v1" / "supportmate" / _BASELINE_SUPPORT_MEMORY,
+        destination / _BASELINE_SUPPORT_MEMORY,
+    )
+    return tmp_path
 
 
 def _credit_schema() -> JsonObject:
@@ -538,8 +551,10 @@ class _EvidenceBoundCreditAntibody:
 
 def test_delta_pipeline_preserves_refund_memory_and_adds_credit_immunity(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
+    repository_root = _REPOSITORY_ROOT
+    memory_root = _memory_root(tmp_path)
     adapter = _CandidateSupportMateAdapter()
     monkeypatch.setitem(TARGET_ADAPTERS, "supportmate", adapter)
     monkeypatch.setattr(
@@ -555,7 +570,7 @@ def test_delta_pipeline_preserves_refund_memory_and_adds_credit_immunity(
     output = DeltaSecurityPipeline(
         model="fake-gemini-3.5-flash",
         adapter=adapter,
-        memory_repository_root=repository_root,
+        memory_repository_root=memory_root,
         candidate_repository_root=repository_root,
         attack_agent=_TenCreditAttacks(),
         antibody_agent=_EvidenceBoundCreditAntibody(),
@@ -642,7 +657,7 @@ def test_delta_pipeline_preserves_refund_memory_and_adds_credit_immunity(
     )
 
     active_policy = load_effective_policy(
-        repository_root=repository_root,
+        repository_root=memory_root,
         target_id="supportmate",
     )
     merged_policy = PolicyRules(
@@ -651,7 +666,7 @@ def test_delta_pipeline_preserves_refund_memory_and_adds_credit_immunity(
             sorted(set(active_policy.untrusted_sources) | set(artifact.policy.untrusted_sources))
         ),
     )
-    existing = load_artifacts(repository_root=repository_root, target_id="supportmate")
+    existing = load_artifacts(repository_root=memory_root, target_id="supportmate")
     assert len(existing) == 1
     historical_rule_ids = tuple(rule.rule_id for rule in active_policy.rules)
     historical_after: list[CaseRun] = []
@@ -689,8 +704,9 @@ def test_delta_pipeline_preserves_refund_memory_and_adds_credit_immunity(
     )
 
 
-def test_real_supportmate_adk_registration_drives_the_credit_delta_pipeline() -> None:
-    repository_root = Path(__file__).resolve().parents[1]
+def test_real_supportmate_adk_registration_drives_the_credit_delta_pipeline(tmp_path: Path) -> None:
+    repository_root = _REPOSITORY_ROOT
+    memory_root = _memory_root(tmp_path)
     head = capture_target_adk_capabilities(SUPPORTMATE_ADAPTER)
     base = head.model_copy(
         update={"tools": tuple(tool for tool in head.tools if tool.name != GRANT_STORE_CREDIT)}
@@ -700,7 +716,7 @@ def test_real_supportmate_adk_registration_drives_the_credit_delta_pipeline() ->
     output = DeltaSecurityPipeline(
         model="fake-gemini-3.5-flash",
         adapter=SUPPORTMATE_ADAPTER,
-        memory_repository_root=repository_root,
+        memory_repository_root=memory_root,
         candidate_repository_root=repository_root,
         attack_agent=_TenCreditAttacks(),
         antibody_agent=_EvidenceBoundCreditAntibody(),
@@ -727,8 +743,9 @@ def test_real_supportmate_adk_registration_drives_the_credit_delta_pipeline() ->
     output.remediation.candidates[0].artifact.validate_for_runtime()
 
 
-def test_delta_pipeline_repairs_an_attack_suite_from_oracle_feedback() -> None:
-    repository_root = Path(__file__).resolve().parents[1]
+def test_delta_pipeline_repairs_an_attack_suite_from_oracle_feedback(tmp_path: Path) -> None:
+    repository_root = _REPOSITORY_ROOT
+    memory_root = _memory_root(tmp_path)
     head = capture_target_adk_capabilities(SUPPORTMATE_ADAPTER)
     base = head.model_copy(
         update={"tools": tuple(tool for tool in head.tools if tool.name != GRANT_STORE_CREDIT)}
@@ -738,7 +755,7 @@ def test_delta_pipeline_repairs_an_attack_suite_from_oracle_feedback() -> None:
     output = DeltaSecurityPipeline(
         model="fake-gemini-3.5-flash",
         adapter=SUPPORTMATE_ADAPTER,
-        memory_repository_root=repository_root,
+        memory_repository_root=memory_root,
         candidate_repository_root=repository_root,
         attack_agent=planner,
         antibody_agent=_EvidenceBoundCreditAntibody(),

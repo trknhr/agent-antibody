@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from shutil import copy2
 
 from agent_antibody.candidate_evaluation import (
     AttackDisposition,
@@ -11,8 +12,17 @@ from agent_antibody.immunity_artifacts import load_artifacts
 from agent_antibody.targets.registry import get_target_adapter
 
 
-def test_existing_immunity_is_applied_before_candidate_attacks() -> None:
+def _memory_root(tmp_path: Path) -> Path:
     repository_root = Path(__file__).resolve().parents[1]
+    filename = "imm-supportmate-f39e99d38aea0305a38f.yaml"
+    destination = tmp_path / "immunities" / "v1" / "supportmate"
+    destination.mkdir(parents=True)
+    copy2(repository_root / "immunities" / "v1" / "supportmate" / filename, destination / filename)
+    return tmp_path
+
+
+def test_existing_immunity_is_applied_before_candidate_attacks(tmp_path: Path) -> None:
+    repository_root = _memory_root(tmp_path)
     adapter = get_target_adapter("supportmate")
     artifacts = load_artifacts(repository_root=repository_root, target_id="supportmate")
     assert len(artifacts) == 1
