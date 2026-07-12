@@ -583,13 +583,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         for change in delta.changes
                     ),
                 )
+                diagnostic = f"delta evaluation failed: {type(error).__name__}: {error}"
                 target = TargetCandidateEvaluation.inconclusive(
                     target_id=target_id,
                     current_memory_count=len(artifacts),
                     evidence=evidence,
-                    reasons=(
-                        f"delta evaluation failed: {type(error).__name__}: {str(error)[:1_000]}",
-                    ),
+                    # CandidateEvaluationV2 limits public, persisted diagnostics to
+                    # 500 characters.  Keep the fail-closed state even when a
+                    # multi-attempt runner summary is longer than that bound.
+                    reasons=(diagnostic[:500],),
                 )
                 assessment = CandidateEvaluationV2.from_targets(
                     base_revision=base_revision,
