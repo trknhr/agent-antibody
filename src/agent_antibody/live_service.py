@@ -102,8 +102,9 @@ class LiveDemoService:
                 suite_concurrency=self.suite_concurrency,
                 protected_replay_attempts=self.protected_replay_attempts,
             ).run(cloud_trace_id=cloud_trace_id)
-            self._cached_reports[target_id] = report
-            self._cached_at[target_id] = time.monotonic()
+            if report.acceptance_passed:
+                self._cached_reports[target_id] = report
+                self._cached_at[target_id] = time.monotonic()
             return report
         finally:
             self._lock.release()

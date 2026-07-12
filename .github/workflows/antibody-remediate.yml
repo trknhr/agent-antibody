@@ -5,22 +5,272 @@ on:
     workflows: ["Agent Antibody Candidate"]
     types: [completed]
 
-permissions:
-  actions: read
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: antibody-remediate-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
   cancel-in-progress: false
 
 jobs:
-  create-immunity-pr:
+  evaluate_delta:
     if: >-
       github.event.workflow_run.conclusion != 'cancelled' &&
       github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment:
+      name: production
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      eligible: ${{ steps.source.outputs.eligible }}
+    steps:
+      - name: Resolve and bind the source pull request
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          PR_NUMBER="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/source-pr.json"
+          HEAD_SHA="$(jq -r '.head.sha' "$RUNNER_TEMP/source-pr.json")"
+          HEAD_REF="$(jq -r '.head.ref' "$RUNNER_TEMP/source-pr.json")"
+          HEAD_REPOSITORY="$(jq -r '.head.repo.full_name // empty' "$RUNNER_TEMP/source-pr.json")"
+          BASE_SHA="$(jq -r '.base.sha' "$RUNNER_TEMP/source-pr.json")"
+          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_SHA" != "$WORKFLOW_HEAD_SHA" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$HEAD_REF" == antibody/* ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git check-ref-format --branch "$HEAD_REF" >/dev/null
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' \
+            | LC_ALL=C sort -u > "$RUNNER_TEMP/trusted-changed-files.txt"
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Check out candidate tree without credentials
+        if: steps.source.outputs.eligible == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.source.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check out base immunity without credentials
+        if: steps.source.outputs.eligible == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.source.outputs.base_sha }}
+          path: base
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download untrusted candidate evaluation
+        if: steps.source.outputs.eligible == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: antibody-candidate-evaluation
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: candidate-artifact
+
+      - name: Validate candidate artifact binding
+        if: steps.source.outputs.eligible == 'true'
+        env:
+          BASE_SHA: ${{ steps.source.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+        run: |
+          ASSESSMENT=candidate-artifact/assessment.json
+          test -f "$ASSESSMENT"
+          test ! -L "$ASSESSMENT"
+          test "$(wc -c < "$ASSESSMENT")" -le 1048576
+          test "$(jq -r '.base_revision' "$ASSESSMENT")" = "$BASE_SHA"
+          test "$(jq -r '.source_revision' "$ASSESSMENT")" = "$HEAD_SHA"
+          jq -e '
+            .schema_version == 2 and
+            (.targets | type == "array") and
+            (.status == "REVALIDATED" or .status == "INCONCLUSIVE")
+          ' "$ASSESSMENT" >/dev/null
+          rm -f candidate-artifact/remediation.json
+          rm -rf -- candidate-artifact/delta-evaluation
+
+      - name: Select one delta-specific Gemini evaluation
+        id: delta
+        if: steps.source.outputs.eligible == 'true'
+        run: |
+          TARGETS=()
+          while IFS= read -r target; do
+            DELTA="candidate-artifact/capability-deltas/$target.json"
+            if [ ! -f "$DELTA" ] || [ -L "$DELTA" ]; then
+              continue
+            fi
+            test "$(wc -c < "$DELTA")" -le 1048576
+            if ! jq -e '
+              .connector == "google-adk" and
+              (.changes | type == "array") and
+              (.attack_required_tools | type == "array") and
+              (.attack_required_tools | length == 1)
+            ' "$DELTA" >/dev/null; then
+              continue
+            fi
+            if jq -e --arg target "$target" '
+              any(.targets[];
+                .target_id == $target and
+                .status == "INCONCLUSIVE" and
+                any(.inconclusive_reasons[];
+                  contains("delta-specific attack campaign required")
+                )
+              )
+            ' candidate-artifact/assessment.json >/dev/null; then
+              TARGETS+=("$target")
+            fi
+          done < <(jq -r '.targets[].target_id' candidate-artifact/assessment.json)
+
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "evaluate=false" >> "$GITHUB_OUTPUT"
+            echo "No single-tool delta requires trusted Gemini evaluation."
+            exit 0
+          fi
+          if [ "${#TARGETS[@]}" -ne 1 ]; then
+            echo "evaluate=false" >> "$GITHUB_OUTPUT"
+            echo "Multiple delta targets remain INCONCLUSIVE; refusing partial remediation."
+            exit 0
+          fi
+          echo "evaluate=true" >> "$GITHUB_OUTPUT"
+          echo "target=${TARGETS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Install isolated evaluation dependencies
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.delta.outputs.evaluate == 'true'
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+          python-version: "3.14.5"
+          enable-cache: false
+
+      - name: Prepare the candidate environment before authentication
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.delta.outputs.evaluate == 'true'
+        run: |
+          uv sync --project candidate --locked --dev
+          test "$(git -C base rev-parse HEAD)" = "${{ steps.source.outputs.base_sha }}"
+          git -C base diff --exit-code
+          test -z "$(git -C base status --porcelain --untracked-files=all)"
+
+      - name: Authenticate the Vertex-only evaluator
+        id: evaluator_auth
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.delta.outputs.evaluate == 'true'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_EVALUATOR_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_EVALUATOR_SERVICE_ACCOUNT }}
+
+      - name: Run bounded Gemini delta evaluation
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.delta.outputs.evaluate == 'true'
+        env:
+          BASE_SHA: ${{ steps.source.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+          TARGET: ${{ steps.delta.outputs.target }}
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          GOOGLE_CLOUD_LOCATION: global
+          GOOGLE_GENAI_USE_VERTEXAI: "true"
+          AGENT_ANTIBODY_MODEL: ${{ vars.AGENT_ANTIBODY_MODEL }}
+        run: |
+          OUTPUT="$RUNNER_TEMP/delta-output"
+          mkdir -p "$OUTPUT"
+          artifact_digest() {
+            find candidate-artifact -type f -print0 \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum \
+              | sha256sum \
+              | cut -d ' ' -f 1
+          }
+          INPUT_DIGEST="$(artifact_digest)"
+          CHANGED_DIGEST="$(sha256sum "$RUNNER_TEMP/trusted-changed-files.txt" | cut -d ' ' -f 1)"
+          env \
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            uv run --project candidate --locked agent-antibody immunity evaluate-delta \
+              --model "$AGENT_ANTIBODY_MODEL" \
+              --target "$TARGET" \
+              --memory-repository-root base \
+              --candidate-repository-root candidate \
+              --base-revision "$BASE_SHA" \
+              --source-revision "$HEAD_SHA" \
+              --changed-files "$RUNNER_TEMP/trusted-changed-files.txt" \
+              --capability-delta "candidate-artifact/capability-deltas/$TARGET.json" \
+              --output-dir "$OUTPUT"
+          test -f "$OUTPUT/assessment.json"
+          test ! -L "$OUTPUT/assessment.json"
+          test "$(wc -c < "$OUTPUT/assessment.json")" -le 1048576
+          test "$(artifact_digest)" = "$INPUT_DIGEST"
+          test "$(sha256sum "$RUNNER_TEMP/trusted-changed-files.txt" | cut -d ' ' -f 1)" = "$CHANGED_DIGEST"
+          test "$(git -C base rev-parse HEAD)" = "$BASE_SHA"
+          git -C base diff --exit-code
+          test -z "$(git -C base status --porcelain --untracked-files=all)"
+
+          rm -rf -- candidate-artifact/delta-evaluation
+          mkdir -p candidate-artifact/delta-evaluation
+          cp "$OUTPUT/assessment.json" candidate-artifact/delta-evaluation/assessment.json
+          if [ -f "$OUTPUT/remediation.json" ]; then
+            test ! -L "$OUTPUT/remediation.json"
+            test "$(wc -c < "$OUTPUT/remediation.json")" -le 1048576
+            cp "$OUTPUT/remediation.json" candidate-artifact/delta-evaluation/remediation.json
+          fi
+
+      - name: Remove evaluator credential material
+        if: >-
+          always() &&
+          steps.source.outputs.eligible == 'true' &&
+          steps.delta.outputs.evaluate == 'true'
+        run: |
+          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+            rm -f -- "$GOOGLE_APPLICATION_CREDENTIALS"
+          fi
+
+      - name: Upload trusted evaluation handoff
+        if: steps.source.outputs.eligible == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: antibody-trusted-evaluation
+          path: candidate-artifact
+          if-no-files-found: error
+          retention-days: 1
+
+  create-immunity-pr:
+    needs: evaluate_delta
+    if: >-
+      needs.evaluate_delta.result == 'success' &&
+      needs.evaluate_delta.outputs.eligible == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
     steps:
       - name: Resolve and bind the source pull request
         id: source
@@ -64,7 +314,7 @@ jobs:
           path: control-plane
           persist-credentials: false
 
-      - name: Check out candidate tree without executing it
+      - name: Check out candidate tree without credentials
         if: steps.source.outputs.eligible == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -73,13 +323,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Download data-only candidate evaluation
+      - name: Download trusted evaluation handoff
         if: steps.source.outputs.eligible == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: antibody-candidate-evaluation
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ github.token }}
+          name: antibody-trusted-evaluation
           path: candidate-artifact
 
       - name: Validate artifact binding before trusted apply
@@ -90,10 +338,66 @@ jobs:
         run: |
           ASSESSMENT=candidate-artifact/assessment.json
           test -f "$ASSESSMENT"
+          test ! -L "$ASSESSMENT"
           test "$(wc -c < "$ASSESSMENT")" -le 1048576
           test "$(jq -r '.base_revision' "$ASSESSMENT")" = "$BASE_SHA"
           test "$(jq -r '.source_revision' "$ASSESSMENT")" = "$HEAD_SHA"
-          jq -e '.schema_version == 2 and (.targets | type == "array") and (.status == "REVALIDATED" or .status == "BYPASS_CONFIRMED" or .status == "INCONCLUSIVE")' "$ASSESSMENT" >/dev/null
+          jq -e '
+            .schema_version == 2 and
+            (.targets | type == "array") and
+            (.status == "REVALIDATED" or .status == "INCONCLUSIVE")
+          ' "$ASSESSMENT" >/dev/null
+          test ! -e candidate-artifact/remediation.json
+
+      - name: Install trusted control-plane dependencies
+        if: steps.source.outputs.eligible == 'true'
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+          python-version: "3.14.5"
+          enable-cache: true
+
+      - name: Merge only the evaluator delta result
+        if: steps.source.outputs.eligible == 'true'
+        working-directory: control-plane
+        run: |
+          uv sync --locked --dev
+          DELTA_ASSESSMENT="$GITHUB_WORKSPACE/candidate-artifact/delta-evaluation/assessment.json"
+          DELTA_REMEDIATION="$GITHUB_WORKSPACE/candidate-artifact/delta-evaluation/remediation.json"
+          if [ ! -f "$DELTA_ASSESSMENT" ]; then
+            echo "No trusted delta result was produced."
+            exit 0
+          fi
+          test ! -L "$DELTA_ASSESSMENT"
+          test "$(wc -c < "$DELTA_ASSESSMENT")" -le 1048576
+          uv run --locked agent-antibody immunity merge-assessments \
+            --base "$GITHUB_WORKSPACE/candidate-artifact/assessment.json" \
+            --replacement "$DELTA_ASSESSMENT" \
+            --output "$RUNNER_TEMP/merged-assessment.json"
+          mv "$RUNNER_TEMP/merged-assessment.json" \
+            "$GITHUB_WORKSPACE/candidate-artifact/assessment.json"
+          rm -f "$GITHUB_WORKSPACE/candidate-artifact/remediation.json"
+          if [ -f "$DELTA_REMEDIATION" ]; then
+            test ! -L "$DELTA_REMEDIATION"
+            test "$(wc -c < "$DELTA_REMEDIATION")" -le 1048576
+            cp "$DELTA_REMEDIATION" \
+              "$GITHUB_WORKSPACE/candidate-artifact/remediation.json"
+          fi
+
+      - name: Validate merged assessment
+        if: steps.source.outputs.eligible == 'true'
+        env:
+          BASE_SHA: ${{ steps.source.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+        run: |
+          ASSESSMENT=candidate-artifact/assessment.json
+          test "$(jq -r '.base_revision' "$ASSESSMENT")" = "$BASE_SHA"
+          test "$(jq -r '.source_revision' "$ASSESSMENT")" = "$HEAD_SHA"
+          jq -e '
+            .schema_version == 2 and
+            (.targets | type == "array") and
+            (.status == "REVALIDATED" or .status == "BYPASS_CONFIRMED" or .status == "INCONCLUSIVE")
+          ' "$ASSESSMENT" >/dev/null
 
       - name: Select only a verified bypass for remediation
         id: assessment
@@ -107,18 +411,9 @@ jobs:
             exit 0
           fi
           test -f candidate-artifact/remediation.json
+          test ! -L candidate-artifact/remediation.json
           test "$(wc -c < candidate-artifact/remediation.json)" -le 1048576
           echo "remediate=true" >> "$GITHUB_OUTPUT"
-
-      - name: Install trusted control-plane dependencies
-        if: >-
-          steps.source.outputs.eligible == 'true' &&
-          steps.assessment.outputs.remediate == 'true'
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: "0.11.28"
-          python-version: "3.14.5"
-          enable-cache: true
 
       - name: Audit source pull request immutable memory
         if: >-

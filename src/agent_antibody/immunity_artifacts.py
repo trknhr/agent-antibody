@@ -1014,6 +1014,8 @@ def audit_immutable_changes(
     if completed.returncode != 0:
         message = completed.stderr.decode("utf-8", errors="replace").strip()
         raise ValueError(f"could not inspect immutable immunity diff: {message}")
+    artifact_changed = False
+    snapshot_changed = False
     fields = completed.stdout.decode("utf-8", errors="strict").split("\0")
     for index in range(0, len(fields) - 1, 2):
         status, path = fields[index], fields[index + 1]
@@ -1022,15 +1024,20 @@ def audit_immutable_changes(
         if path == (IMMUNITY_DIRECTORY / SNAPSHOT_FILENAME).as_posix():
             if status not in {"A", "M"}:
                 raise ValueError("immunity snapshot may only be added or regenerated")
+            snapshot_changed = True
             continue
         if not _is_immutable_artifact_path(path):
             raise ValueError(f"immunity diff contains a non-canonical path: {path}")
         if status != "A":
             raise ValueError(f"immutable immunity artifact must be additive, not {status}: {path}")
+        artifact_changed = True
 
+    if artifact_changed and not snapshot_changed:
+        raise ValueError("adding immutable immunity memory requires a regenerated snapshot")
     # A snapshot changed in the diff must be a truthful projection of current memory.
-    snapshot = snapshot_path(repository_root=root)
-    if snapshot.exists():
+    # If the source PR changes only the agent, its prior snapshot is expected to describe
+    # the Base capability surface until the trusted writer adds the new immunity memory.
+    if snapshot_changed:
         verify_snapshot(repository_root=root)
 
 

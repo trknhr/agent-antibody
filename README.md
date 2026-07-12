@@ -206,8 +206,11 @@ The GitHub flow is intentionally split at the trust boundary:
 Agent PR (read-only candidate workflow)
   -> Base/Head Google ADK capability snapshots
   -> existing immutable memory replayed first
+  -> REVALIDATED | INCONCLUSIVE(new tool)
+  -> isolated Vertex-only Gemini delta evaluation
+  -> deterministic candidate harness and merged assessment
   -> REVALIDATED | BYPASS_CONFIRMED | INCONCLUSIVE
-  -> trusted remediation workflow
+  -> separate trusted PR-writer job
   -> stacked draft PR only for a verified BYPASS_CONFIRMED result
   -> review + merge into the source PR
   -> Cloud Run live Gemini release gate
@@ -216,19 +219,34 @@ Agent PR (read-only candidate workflow)
 `Agent Antibody Candidate` executes candidate code with only `contents: read`,
 no secrets, no cache, and no write token. It captures the declarations from Base
 and Head separately and reads active immunity from Base, so a candidate cannot
-hide an existing memory. `Agent Antibody Remediate` runs only
-trusted default-branch control-plane code. It independently fetches the PR
-diff, recomputes affected targets and source fingerprints, rejects missing or
-forged candidate records, writes only additive `immunities/v1/**` files, and
-opens a stacked draft PR whose base is the original PR branch. Fork PRs never
-receive an automatic write/PR. Existing memory is append-only; a rerun reuses
-the already-created remediation branch rather than overwriting it.
+hide an existing memory. When exactly one observed ADK tool needs new attack
+coverage, `Agent Antibody Remediate` uses a workflow-pinned WIF provider and a
+dedicated Vertex-only service account to run the bounded Gemini delta campaign.
+That job has `contents: read` and no pull-request permission. Its data-only
+result is handed to a fresh job with no OIDC permission; only that second job
+runs trusted default-branch control-plane code, merges the assessment, writes
+additive `immunities/v1/**` files, and opens a stacked draft PR. Fork PRs never
+receive evaluation credentials or an automatic write/PR. Existing memory is
+append-only; a rerun reuses the already-created remediation branch rather than
+overwriting it.
+
+The `production` GitHub environment supplies two non-secret evaluator values:
+
+- `GCP_EVALUATOR_WIF_PROVIDER`: the provider restricted to
+  `.github/workflows/antibody-remediate.yml@refs/heads/main`.
+- `GCP_EVALUATOR_SERVICE_ACCOUNT`: a dedicated account with only
+  `roles/aiplatform.user`; it has no Cloud Run, IAM, Secret Manager, or GitHub
+  write authority.
 
 This GitHub-only path is deliberately a draft-remediation aid, not a release
 gate: it is a deterministic ADK policy-enforcement harness, not proof of how a
 live model will interpret arbitrary prompt text. The Cloud Run live Gemini gate
 remains the release authority until a fixed external candidate sandbox can issue
 signed campaign receipts.
+
+The live gate retries a protected probe at most once only when it made neither a
+dangerous tool request nor an unsafe state change. Any observed unsafe behavior,
+invalid run, or non-policy denial remains fail-closed.
 
 For a local capability and revalidation dry run:
 

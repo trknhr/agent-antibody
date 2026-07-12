@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -8,6 +9,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+import agent_antibody.immunity_artifacts as immunity_artifacts
 from agent_antibody.candidate_evaluation import (
     AttackCohort,
     AttackDisposition,
@@ -26,6 +28,7 @@ from agent_antibody.immunity_artifacts import (
     ImmunityEvaluation,
     SnapshotLifecycle,
     apply_evaluation,
+    audit_immutable_changes,
     create_snapshot,
     detect_affected_targets,
     load_artifacts,
@@ -505,6 +508,59 @@ def test_trusted_apply_accepts_one_remediation_after_full_target_assessment(
         trusted_source_revision=SOURCE_REVISION,
         trusted_changed_paths=("src/agent_antibody/ai_agents.py",),
     )
+
+
+def test_audit_skips_a_stale_base_snapshot_when_source_pr_changes_no_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("repomate"),
+        source_revision=SOURCE_REVISION,
+        captured_at=CAPTURED_AT,
+    )
+    apply_evaluation(
+        ImmunityEvaluation(
+            source_revision=SOURCE_REVISION,
+            changed_paths=("src/agent_antibody/targets/repomate.py",),
+            evaluated_at=CAPTURED_AT,
+            candidates=(CandidateImmunity(action="create", artifact=artifact),),
+        ),
+        repository_root=tmp_path,
+    )
+    for command in (
+        ("git", "init"),
+        ("git", "config", "user.email", "test@example.com"),
+        ("git", "config", "user.name", "Agent Antibody Test"),
+        ("git", "add", "."),
+        ("git", "commit", "-m", "baseline immunity"),
+    ):
+        subprocess.run(command, cwd=tmp_path, check=True, capture_output=True)
+    base_revision = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source = tmp_path / "src" / "agent_antibody" / "targets"
+    source.mkdir(parents=True)
+    (source / "repomate.py").write_text("# candidate tool delta\n", encoding="utf-8")
+    subprocess.run(("git", "add", "."), cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "commit", "-m", "candidate adds a tool"),
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    def snapshot_must_not_be_verified(*, repository_root: Path) -> object:
+        del repository_root
+        raise AssertionError("source PR did not change immutable memory")
+
+    monkeypatch.setattr(immunity_artifacts, "verify_snapshot", snapshot_must_not_be_verified)
+
+    audit_immutable_changes(repository_root=tmp_path, base_revision=base_revision)
 
 
 def test_snapshot_rejects_unallowlisted_nested_content(tmp_path: Path) -> None:
