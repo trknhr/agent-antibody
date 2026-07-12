@@ -26,11 +26,68 @@ from agent_antibody.immunity_artifacts import (
     verify_artifact,
     verify_snapshot,
 )
+from agent_antibody.manifests import RiskTag, TargetManifest, ToolManifest
 from agent_antibody.portfolio_demo import run_target_demo
-from agent_antibody.targets.registry import TARGET_IDS, get_target_adapter
+from agent_antibody.targets.base import TargetAdapter
+from agent_antibody.targets.registry import TARGET_ADAPTERS, TARGET_IDS, get_target_adapter
 
 SOURCE_REVISION = "a" * 40
 CAPTURED_AT = datetime(2026, 7, 11, tzinfo=UTC)
+
+
+class _ManifestOverrideAdapter:
+    def __init__(self, delegate: TargetAdapter, manifest: TargetManifest) -> None:
+        self._delegate = delegate
+        self._manifest = manifest
+
+    @property
+    def manifest(self) -> TargetManifest:
+        return self._manifest
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._delegate, name)
+
+
+def _with_supportmate_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    manifest: TargetManifest,
+) -> None:
+    adapter = get_target_adapter("supportmate")
+    monkeypatch.setitem(
+        TARGET_ADAPTERS,
+        "supportmate",
+        cast(TargetAdapter, _ManifestOverrideAdapter(adapter, manifest)),
+    )
+
+
+def _manifest_with_unrelated_tool(manifest: TargetManifest) -> TargetManifest:
+    added = ToolManifest(
+        name="grant_store_credit",
+        description="Grant store credit to a customer account.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "customer_id": {"type": "string"},
+                "amount_cents": {"type": "integer", "minimum": 1},
+            },
+            "required": ["customer_id", "amount_cents"],
+        },
+        risk_tags=(RiskTag.WRITE, RiskTag.FINANCIAL),
+        mutates_state=True,
+    )
+    return manifest.model_copy(update={"tools": (*manifest.tools, added)})
+
+
+def _as_legacy_v1(artifact: ImmunityArtifact) -> ImmunityArtifact:
+    legacy = artifact.model_copy(
+        update={
+            "schema_version": 1,
+            "manifest_contract": None,
+        }
+    )
+    legacy = legacy.model_copy(update={"artifact_id": legacy.expected_artifact_id()})
+    return ImmunityArtifact.model_validate(legacy.model_dump(mode="json"))
 
 
 @pytest.mark.parametrize("target_id", TARGET_IDS)
@@ -48,6 +105,102 @@ def test_immutable_artifact_round_trips_and_replays_every_target(target_id: str)
     assert verification.passed
     assert verification.blocked_attacks == 10
     assert verification.healthy_normal_cases == 1
+
+
+def test_artifact_allows_an_unrelated_tool_addition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision=SOURCE_REVISION,
+        captured_at=CAPTURED_AT,
+    )
+    original_manifest = get_target_adapter("supportmate").manifest
+    _with_supportmate_manifest(
+        monkeypatch,
+        _manifest_with_unrelated_tool(original_manifest),
+    )
+
+    artifact.validate_for_runtime()
+    _as_legacy_v1(artifact).validate_for_runtime()
+
+
+def test_artifact_rejects_removing_a_referenced_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision=SOURCE_REVISION,
+        captured_at=CAPTURED_AT,
+    )
+    original_manifest = get_target_adapter("supportmate").manifest
+    incompatible_manifest = original_manifest.model_copy(
+        update={
+            "tools": tuple(tool for tool in original_manifest.tools if tool.name != "issue_refund"),
+            "attack_profile": None,
+        }
+    )
+    _with_supportmate_manifest(monkeypatch, incompatible_manifest)
+
+    with pytest.raises(ValueError, match="referenced tool input schema changed: issue_refund"):
+        artifact.validate_for_runtime()
+
+
+def test_artifact_rejects_a_referenced_tool_schema_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision=SOURCE_REVISION,
+        captured_at=CAPTURED_AT,
+    )
+    original_manifest = get_target_adapter("supportmate").manifest
+    changed_tools = tuple(
+        tool.model_copy(
+            update={
+                "input_schema": {
+                    **tool.input_schema,
+                    "properties": {
+                        **cast(dict[str, object], tool.input_schema["properties"]),
+                        "amount_cents": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1_000,
+                        },
+                    },
+                }
+            }
+        )
+        if tool.name == "issue_refund"
+        else tool
+        for tool in original_manifest.tools
+    )
+    _with_supportmate_manifest(
+        monkeypatch,
+        original_manifest.model_copy(update={"tools": changed_tools}),
+    )
+
+    with pytest.raises(ValueError, match="referenced tool input schema changed: issue_refund"):
+        artifact.validate_for_runtime()
+
+    with pytest.raises(ValueError, match="arguments do not match the tool schema"):
+        _as_legacy_v1(artifact).validate_for_runtime()
+
+
+def test_manifest_contract_is_content_addressed() -> None:
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision=SOURCE_REVISION,
+        captured_at=CAPTURED_AT,
+    )
+    payload = cast(dict[str, object], artifact.model_dump(mode="json"))
+    manifest_contract = cast(dict[str, object], payload["manifest_contract"])
+    tools = cast(list[dict[str, object]], manifest_contract["tools"])
+    schema = cast(dict[str, object], tools[0]["input_schema"])
+    schema["title"] = "tampered"
+
+    with pytest.raises(ValidationError, match="artifact_id does not match"):
+        ImmunityArtifact.model_validate(payload)
 
 
 def test_immutable_artifact_rejects_tampering() -> None:

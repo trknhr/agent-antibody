@@ -386,7 +386,7 @@ class OpsMateAdapter:
     def create_agent(
         self,
         *,
-        model: str,
+        model: str | BaseLlm,
         timeout_seconds: float,
         max_llm_calls: int,
     ) -> TargetAgent:

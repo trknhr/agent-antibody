@@ -4,19 +4,37 @@ import argparse
 import json
 import os
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
+from agent_antibody.adk_capabilities import capture_target_adk_capabilities
+from agent_antibody.candidate_assessment import assess_repository_revalidation
+from agent_antibody.candidate_evaluation import (
+    CandidateEvaluationStatus,
+    CandidateEvaluationV2,
+    CandidateTargetEvidence,
+    TargetCandidateEvaluation,
+)
+from agent_antibody.capabilities import (
+    AttackSurfaceDelta,
+    CapabilitySnapshot,
+    diff_capability_snapshots,
+)
 from agent_antibody.contracts import PolicyMode
 from agent_antibody.core_types import tool_id
+from agent_antibody.delta_pipeline import DeltaSecurityPipeline
 from agent_antibody.demo import DemoReport, run_demo
 from agent_antibody.generic_runner import CaseRun
 from agent_antibody.immunity_artifacts import (
     SnapshotLifecycle,
+    SnapshotMemoryProjection,
     apply_evaluation,
     audit_immutable_changes,
+    detect_affected_targets,
     evaluate_repository,
     load_artifacts,
+    validate_assessment_remediation_binding,
     verify_artifact,
     verify_snapshot,
 )
@@ -29,7 +47,7 @@ from agent_antibody.recipes import (
 )
 from agent_antibody.runner import ScenarioRun, run_scenario
 from agent_antibody.scenarios import MALICIOUS_RUNBOOK
-from agent_antibody.targets.registry import TARGET_IDS
+from agent_antibody.targets.registry import TARGET_IDS, get_target_adapter
 
 
 def _run_row(label: str, run: ScenarioRun) -> str:
@@ -172,6 +190,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     live.add_argument("--json", action="store_true", help="Print the complete JSON report")
 
+    capabilities = subparsers.add_parser(
+        "capabilities",
+        help="Capture and compare the tools Google ADK actually exposes to its model",
+    )
+    capability_subparsers = capabilities.add_subparsers(
+        dest="capability_command",
+        required=True,
+    )
+    capture = capability_subparsers.add_parser(
+        "capture",
+        help="Capture one registered target's provider-facing ADK declarations",
+    )
+    capture.add_argument("--target", choices=TARGET_IDS, required=True)
+    capture.add_argument("--output", type=Path, required=True)
+    compare = capability_subparsers.add_parser(
+        "diff",
+        help="Compare two previously captured ADK capability snapshots",
+    )
+    compare.add_argument("--base", type=Path, required=True)
+    compare.add_argument("--head", type=Path, required=True)
+    compare.add_argument("--output", type=Path, required=True)
+
     immunity = subparsers.add_parser(
         "immunity",
         help="Capture, verify, and apply immutable policy-and-regression memory",
@@ -210,6 +250,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Validate a candidate artifact and write only immutable immunity files",
     )
     apply.add_argument("--evaluation", type=Path, required=True)
+    apply.add_argument(
+        "--assessment",
+        type=Path,
+        help="Typed v2 assessment used to label active versus pending memory",
+    )
     apply.add_argument("--repository-root", type=Path, default=Path("."))
     apply.add_argument(
         "--lifecycle-state",
@@ -255,12 +300,95 @@ def _build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--repository-root", type=Path, default=Path("."))
     audit.add_argument("--base-revision", required=True)
     audit.add_argument("--head-revision", default="HEAD")
+    gate = immunity_subparsers.add_parser(
+        "gate",
+        help="Apply the fail-closed CI exit status from a typed candidate assessment",
+    )
+    gate.add_argument("--assessment", type=Path, required=True)
+    assess = immunity_subparsers.add_parser(
+        "assess",
+        help="Replay active memory and classify capability deltas without creating memory",
+    )
+    assess.add_argument("--memory-repository-root", type=Path, default=Path("."))
+    assess.add_argument("--base-revision", required=True)
+    assess.add_argument("--source-revision", required=True)
+    assess.add_argument("--capability-delta-dir", type=Path, required=True)
+    assess.add_argument(
+        "--target",
+        choices=(*TARGET_IDS, "all"),
+        action="append",
+        help="Target to assess; repeat for multiple targets (default: all)",
+    )
+    assess.add_argument("--output", type=Path, required=True)
+    affected = immunity_subparsers.add_parser(
+        "affected",
+        help="Resolve changed repository paths to registered security targets",
+    )
+    affected.add_argument("--changed-files", type=Path, required=True)
+    affected.add_argument("--output", type=Path, required=True)
+    evaluate_delta = immunity_subparsers.add_parser(
+        "evaluate-delta",
+        help="Use Gemini to attack one changed ADK tool and build verified delta memory",
+    )
+    evaluate_delta.add_argument("--model", help="Defaults to AGENT_ANTIBODY_MODEL")
+    evaluate_delta.add_argument("--target", choices=TARGET_IDS, required=True)
+    evaluate_delta.add_argument("--memory-repository-root", type=Path, required=True)
+    evaluate_delta.add_argument("--candidate-repository-root", type=Path, default=Path("."))
+    evaluate_delta.add_argument("--base-revision", required=True)
+    evaluate_delta.add_argument("--source-revision", required=True)
+    evaluate_delta.add_argument("--changed-files", type=Path, required=True)
+    evaluate_delta.add_argument("--capability-delta", type=Path, required=True)
+    evaluate_delta.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "capabilities":
+        if args.capability_command == "capture":
+            snapshot = capture_target_adk_capabilities(get_target_adapter(cast(str, args.target)))
+            output = cast(Path, args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(snapshot.canonical_json() + "\n", encoding="utf-8")
+            print(
+                json.dumps(
+                    {
+                        "target_id": args.target,
+                        "snapshot_sha256": snapshot.digest(),
+                        "tools": [tool.name for tool in snapshot.tools],
+                        "output": str(output),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+
+        base = CapabilitySnapshot.model_validate_json(
+            cast(Path, args.base).read_text(encoding="utf-8")
+        )
+        head = CapabilitySnapshot.model_validate_json(
+            cast(Path, args.head).read_text(encoding="utf-8")
+        )
+        delta = diff_capability_snapshots(base, head)
+        output = cast(Path, args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(delta.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            json.dumps(
+                {
+                    "changed": delta.changed,
+                    "attack_required_tools": list(delta.attack_required_tools),
+                    "output": str(output),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
     if args.command == "demo":
         report = run_demo()
         if args.json:
@@ -393,6 +521,172 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "immunity":
         immunity_command = cast(str, args.immunity_command)
+        if immunity_command == "evaluate-delta":
+            model = cast(str | None, args.model) or os.getenv("AGENT_ANTIBODY_MODEL")
+            if not model:
+                parser.error("evaluate-delta requires --model or AGENT_ANTIBODY_MODEL")
+            target_id = cast(str, args.target)
+            base_revision = cast(str, args.base_revision)
+            source_revision = cast(str, args.source_revision)
+            memory_root = cast(Path, args.memory_repository_root)
+            changed_paths = tuple(
+                line.strip()
+                for line in cast(Path, args.changed_files).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+            delta = AttackSurfaceDelta.model_validate_json(
+                cast(Path, args.capability_delta).read_text(encoding="utf-8")
+            )
+            output_dir = cast(Path, args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                output = DeltaSecurityPipeline(
+                    model=model,
+                    adapter=get_target_adapter(target_id),
+                    memory_repository_root=memory_root,
+                    candidate_repository_root=cast(Path, args.candidate_repository_root),
+                ).run(
+                    base_revision=base_revision,
+                    source_revision=source_revision,
+                    changed_paths=changed_paths,
+                    delta=delta,
+                )
+            except Exception as error:
+                artifacts = load_artifacts(
+                    repository_root=memory_root,
+                    target_id=target_id,
+                )
+                evidence = CandidateTargetEvidence(
+                    existing_policy_artifact_ids=tuple(
+                        artifact.artifact_id for artifact in artifacts
+                    ),
+                    attack_surface_change_ids=tuple(
+                        f"{change.kind.value}:{change.tool_name or 'agent-instruction'}"
+                        for change in delta.changes
+                    ),
+                )
+                target = TargetCandidateEvaluation.inconclusive(
+                    target_id=target_id,
+                    current_memory_count=len(artifacts),
+                    evidence=evidence,
+                    reasons=(f"delta evaluation failed: {type(error).__name__}",),
+                )
+                assessment = CandidateEvaluationV2.from_targets(
+                    base_revision=base_revision,
+                    source_revision=source_revision,
+                    evaluated_at=datetime.now(UTC),
+                    targets=(target,),
+                )
+                (output_dir / "assessment.json").write_text(assessment.to_json(), encoding="utf-8")
+                print(
+                    json.dumps(
+                        {
+                            "status": assessment.status.value,
+                            "reason": target.inconclusive_reasons[0],
+                        }
+                    )
+                )
+                return 0
+            (output_dir / "assessment.json").write_text(
+                output.assessment.to_json(), encoding="utf-8"
+            )
+            (output_dir / "remediation.json").write_text(
+                output.remediation.to_json(), encoding="utf-8"
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": output.assessment.status.value,
+                        "artifact_ids": [
+                            reference.artifact_id
+                            for reference in output.assessment.remediation_artifacts
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+
+        if immunity_command == "affected":
+            changed_paths = tuple(
+                line.strip()
+                for line in cast(Path, args.changed_files).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+            targets = detect_affected_targets(changed_paths)
+            output = cast(Path, args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(list(targets), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(json.dumps({"targets": list(targets), "output": str(output)}))
+            return 0
+
+        if immunity_command == "assess":
+            requested_targets = cast(list[str] | None, args.target)
+            selected_targets = (
+                TARGET_IDS
+                if not requested_targets or "all" in requested_targets
+                else tuple(target_id for target_id in TARGET_IDS if target_id in requested_targets)
+            )
+            delta_directory = cast(Path, args.capability_delta_dir)
+            capability_deltas = {
+                target_id: AttackSurfaceDelta.model_validate_json(
+                    (delta_directory / f"{target_id}.json").read_text(encoding="utf-8")
+                )
+                for target_id in selected_targets
+            }
+            assessment = assess_repository_revalidation(
+                memory_repository_root=cast(Path, args.memory_repository_root),
+                base_revision=cast(str, args.base_revision),
+                source_revision=cast(str, args.source_revision),
+                capability_deltas=capability_deltas,
+            )
+            output = cast(Path, args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(assessment.to_json(), encoding="utf-8")
+            print(
+                json.dumps(
+                    {
+                        "status": assessment.status.value,
+                        "targets": [
+                            {
+                                "target_id": target.target_id,
+                                "status": target.status.value,
+                                "current_memory_count": target.current_memory_count,
+                                "proposed_memory_count": target.proposed_memory_count,
+                            }
+                            for target in assessment.targets
+                        ],
+                        "output": str(output),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+
+        if immunity_command == "gate":
+            assessment = CandidateEvaluationV2.from_json(
+                cast(Path, args.assessment).read_text(encoding="utf-8")
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": assessment.status.value,
+                        "current_memory_count": assessment.current_memory_count,
+                        "proposed_memory_count": assessment.proposed_memory_count,
+                        "requires_remediation": assessment.requires_remediation,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            if assessment.status == CandidateEvaluationStatus.REVALIDATED:
+                return 0
+            if assessment.status == CandidateEvaluationStatus.BYPASS_CONFIRMED:
+                return 2
+            return 1
+
         if immunity_command == "evaluate":
             changed_files_path = cast(Path | None, args.changed_files)
             changed_paths = (
@@ -443,6 +737,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             evaluation = ImmunityEvaluation.from_json(
                 cast(Path, args.evaluation).read_text(encoding="utf-8")
             )
+            assessment_path = cast(Path | None, args.assessment)
+            assessment = (
+                CandidateEvaluationV2.from_json(assessment_path.read_text(encoding="utf-8"))
+                if assessment_path is not None
+                else None
+            )
+            if assessment is not None:
+                validate_assessment_remediation_binding(assessment, evaluation)
             lifecycle = SnapshotLifecycle(
                 state=cast(
                     Literal["baseline", "verified_pending_review", "release_ready"],
@@ -453,6 +755,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 remediation_branch=cast(str | None, args.remediation_branch),
                 remediation_pr_url=cast(str | None, args.remediation_pr_url),
                 workflow_run_url=cast(str | None, args.workflow_run_url),
+                evaluation_status=(
+                    assessment.status.value if assessment is not None else "RELEASE_READY"
+                ),
+                memory_projections=(
+                    tuple(
+                        SnapshotMemoryProjection(
+                            target_id=target.target_id,
+                            active=target.current_memory_count,
+                            pending=(target.proposed_memory_count - target.current_memory_count),
+                        )
+                        for target in assessment.targets
+                    )
+                    if assessment is not None
+                    else ()
+                ),
             )
             trusted_changed_files = cast(Path | None, args.trusted_changed_files)
             trusted_changed_paths = (

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from google.adk.models.base_llm import BaseLlm
+
 from agent_antibody.agent import AgentRunResult
 from agent_antibody.ai_models import AttackPlan
 from agent_antibody.contracts import SignedApproval, ToolCallResult
@@ -76,7 +78,7 @@ class TargetAdapter(Protocol):
     def create_agent(
         self,
         *,
-        model: str,
+        model: str | BaseLlm,
         timeout_seconds: float,
         max_llm_calls: int,
     ) -> TargetAgent: ...

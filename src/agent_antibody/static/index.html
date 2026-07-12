@@ -294,8 +294,8 @@
           <p class="eyebrow">Security CI for tool-using agents</p>
           <h1>Agent<br />Antibody</h1>
           <p class="lede">
-            Every agent change is challenged before release. Confirmed unsafe tool execution becomes
-            an approval policy and a regression memory; the browser only shows the resulting CI state.
+            Google ADK tool declarations are diffed on every agent PR. Existing immunity is applied
+            first; only a confirmed new bypass becomes policy and regression memory.
           </p>
         </div>
         <aside class="snapshot-stamp" aria-live="polite">
@@ -334,15 +334,15 @@
             <p class="panel-kicker">How immunity is maintained</p>
             <h2 id="lifecycle-title">An agent change starts a verification loop</h2>
           </div>
-          <p>CI uses a target-specific ADK enforcement harness; the Cloud Run release gate adds live Gemini attack and policy generation. Tool traces, policy decisions, and simulator state changes decide acceptance.</p>
+          <p>The connector observes the declarations ADK actually sends to its model. Gemini designs attacks for changed capabilities; tool traces, policy decisions, and simulator state changes decide acceptance.</p>
         </div>
         <div class="flow" aria-label="Agent Antibody CI lifecycle">
           <article class="flow-step"><small>01</small><strong>Agent PR changes</strong><span>observed</span></article>
-          <article class="flow-step"><small>02</small><strong>Attack suite generated</strong><span>target-specific</span></article>
-          <article class="flow-step"><small>03</small><strong>Tool trace evaluated</strong><span>deterministic oracle</span></article>
-          <article class="flow-step"><small>04</small><strong>Policy + test formed</strong><span>immune memory</span></article>
-          <article class="flow-step"><small>05</small><strong>Antibody PR opened</strong><span>reviewable change</span></article>
-          <article class="flow-step"><small>06</small><strong>Release gate checks</strong><span>safe + useful</span></article>
+          <article class="flow-step"><small>02</small><strong>ADK surface diffed</strong><span>actual declarations</span></article>
+          <article class="flow-step"><small>03</small><strong>Existing memory replayed</strong><span>active policy first</span></article>
+          <article class="flow-step"><small>04</small><strong>Gemini attacks the delta</strong><span>deterministic oracle</span></article>
+          <article class="flow-step"><small>05</small><strong>Antibody PR opened</strong><span>confirmed bypass only</span></article>
+          <article class="flow-step"><small>06</small><strong>All memory revalidated</strong><span>safe + useful</span></article>
         </div>
         <div class="lifecycle-meta" id="lifecycle-meta" aria-live="polite"></div>
       </section>
@@ -353,7 +353,7 @@
             <p class="panel-kicker">Current immune inventory</p>
             <h2 id="inventory-title">Policies and regression memories by target</h2>
           </div>
-          <p>Each target preserves one confirmed failure as a memory seed and validates it against held-out attack variants.</p>
+          <p>Every confirmed bypass adds one immutable seed and nine held-out variants. Revalidation alone never increases memory.</p>
         </div>
         <div class="target-grid" id="target-grid" aria-live="polite">
           <div class="empty">Loading the latest target snapshots…</div>
@@ -494,8 +494,20 @@
 
         const detail = node("div", "target-detail");
         const facts = node("dl", "facts");
-        const tools = targetTools(target.dangerous_tools);
-        appendFact(facts, "Dangerous tools", tools.length ? tools.join(", ") : "—");
+        appendFact(facts, "SDK connector", text(target.connector, "unknown"));
+        const registeredTools = targetTools(target.registered_tools);
+        appendFact(
+          facts,
+          "ADK registered tools",
+          registeredTools.length ? registeredTools.join(", ") : "—",
+        );
+        const governedTools = targetTools(target.governed_tools);
+        appendFact(
+          facts,
+          "Policy-governed tools",
+          governedTools.length ? governedTools.join(", ") : "—",
+        );
+        appendFact(facts, "Capability snapshot", text(target.capability_sha256));
 
         const rules = targetRules(target.rules);
         const ruleList = node("ul", "rule-list");
@@ -517,7 +529,12 @@
           integer(metrics.normal_success) > 0 ? "HEALTHY" : "REVIEW REQUIRED",
         );
 
-        appendFact(facts, "Stored immunity memories", `${integer(target.memory_count)} active`);
+        const activeMemory = integer(target.active_memory_count);
+        const pendingMemory = integer(target.pending_memory_count);
+        const memoryLabel = pendingMemory > 0
+          ? `${activeMemory} active + ${pendingMemory} pending · ${integer(target.memory_count)} projected`
+          : `${activeMemory} active`;
+        appendFact(facts, "Stored immunity memories", memoryLabel);
         const memoryRow = node("div", "memory-row");
         memoryRow.append(
           node(
@@ -540,6 +557,11 @@
         const value = object(lifecycle);
         lifecycleMeta.replaceChildren();
         appendMeta(lifecycleMeta, "Snapshot state", text(value.state, "UNKNOWN"));
+        appendMeta(
+          lifecycleMeta,
+          "Candidate evaluation",
+          text(value.evaluation_status, "UNKNOWN"),
+        );
         const sourcePr = value.source_pr_number === null || value.source_pr_number === undefined
           ? "No source pull request recorded"
           : `Source PR #${text(value.source_pr_number)}`;
@@ -558,7 +580,7 @@
         const targets = list(snapshot.targets);
         const immuneTargets = targets.filter(isImmune);
         const blocked = targets.reduce((total, target) => total + integer(metricsFor(target).confirmed_blocked), 0);
-        const healthy = targets.filter((target) => integer(metricsFor(target).normal_success) > 0).length;
+        const healthy = targets.reduce((total, target) => total + integer(metricsFor(target).normal_success), 0);
         const lifecycle = object(snapshot.lifecycle);
         const state = text(lifecycle.state, "SNAPSHOT READY").toUpperCase();
 

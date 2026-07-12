@@ -31,6 +31,10 @@ or access to a real service control plane.
   and confirmed evidence before activating policy.
 - Regression bundles that are directly executable in CI.
 - Google ADK adapters for OpsMate, RepoMate, and SupportMate running through the same Gateway.
+- A Google ADK capability connector that captures the exact function declarations
+  sent to the model and deterministically compares Base and Head snapshots. Tool
+  names, descriptions, input schemas, and instruction digests are observed without
+  credentials or tool execution; hand-authored risk tags cannot suppress testing.
 - Gemini Attack Agent and Antibody Agent using structured output.
 - Ten-case attack campaigns: Gemini generates ten distinct injection techniques,
   uses one confirmed case as immune memory, and verifies the resulting antibody
@@ -39,9 +43,12 @@ or access to a real service control plane.
   against the exact untrusted document grammar each vulnerable adapter consumes.
 - Immutable immunity artifacts: a policy, one memory seed, and nine held-out
   regression variants are committed together under `immunities/v1/`.
-- A two-stage GitHub workflow that detects agent changes, produces data-only
-  candidate evidence, and opens a stacked draft immunity PR for same-repository
-  pull requests.
+- A fail-closed candidate state machine: `REVALIDATED` creates no memory,
+  `BYPASS_CONFIRMED` may create one stacked draft immunity PR, and `INCONCLUSIVE`
+  blocks release without creating policy.
+- Backward-compatible immutable memory contracts: unrelated new tools do not
+  invalidate old regressions, while removal or schema changes to referenced tools
+  fail closed.
 - Read-only FastAPI dashboard for the currently committed immunity state.
 - Cloud Run source deployment workflow with Workload Identity Federation.
 
@@ -49,6 +56,8 @@ or access to a real service control plane.
 
 ```text
 Target registry (OpsMate / RepoMate / SupportMate)
+  -> Google ADK outbound capability snapshot (Base vs Head)
+  -> deterministic AttackSurfaceDelta
   -> target-specific attack materializer
 Candidate target through production Google ADK wrapper
   -> deterministic, credential-free adversarial model fixture
@@ -156,8 +165,8 @@ The API exposes:
 
 `POST /api/live` accepts `{"target_id":"opsmate|repomate|supportmate"}` and
 requires `Content-Type: application/json` and a request bearer token matching
-`AGENT_ANTIBODY_LIVE_API_TOKEN`. The browser keeps the entered token only in the
-current page; it is not embedded in JavaScript or written to browser storage.
+`AGENT_ANTIBODY_LIVE_API_TOKEN`. The read-only browser dashboard never accepts or
+stores that token and cannot trigger this endpoint.
 `GET /api/live/status` reports whether live mode is configured; it deliberately
 does not claim that Vertex IAM, model availability, or quota has been verified.
 
@@ -195,15 +204,19 @@ The GitHub flow is intentionally split at the trust boundary:
 
 ```text
 Agent PR (read-only candidate workflow)
-  -> data-only evaluation artifact
+  -> Base/Head Google ADK capability snapshots
+  -> existing immutable memory replayed first
+  -> REVALIDATED | BYPASS_CONFIRMED | INCONCLUSIVE
   -> trusted remediation workflow
-  -> antibody/pr-<source-pr>-<sha> stacked draft PR
+  -> stacked draft PR only for a verified BYPASS_CONFIRMED result
   -> review + merge into the source PR
   -> Cloud Run live Gemini release gate
 ```
 
 `Agent Antibody Candidate` executes candidate code with only `contents: read`,
-no secrets, no cache, and no write token. `Agent Antibody Remediate` runs only
+no secrets, no cache, and no write token. It captures the declarations from Base
+and Head separately and reads active immunity from Base, so a candidate cannot
+hide an existing memory. `Agent Antibody Remediate` runs only
 trusted default-branch control-plane code. It independently fetches the PR
 diff, recomputes affected targets and source fingerprints, rejects missing or
 forged candidate records, writes only additive `immunities/v1/**` files, and
@@ -217,19 +230,24 @@ live model will interpret arbitrary prompt text. The Cloud Run live Gemini gate
 remains the release authority until a fixed external candidate sandbox can issue
 signed campaign receipts.
 
-For a local dry run:
+For a local capability and revalidation dry run:
 
 ```bash
-REVISION="$(git rev-parse HEAD)"
-printf '%s\n' src/agent_antibody/targets/supportmate.py > /tmp/changed-files.txt
-uv run agent-antibody immunity evaluate \
-  --repository-root . \
-  --source-revision "$REVISION" \
-  --changed-files /tmp/changed-files.txt \
-  --output /tmp/antibody-evaluation.json
-uv run agent-antibody immunity apply \
-  --evaluation /tmp/antibody-evaluation.json \
-  --repository-root .
+mkdir -p /tmp/antibody-deltas
+uv run agent-antibody capabilities capture \
+  --target supportmate --output /tmp/support-base.json
+uv run agent-antibody capabilities diff \
+  --base /tmp/support-base.json --head /tmp/support-base.json \
+  --output /tmp/antibody-deltas/supportmate.json
+uv run agent-antibody immunity assess \
+  --memory-repository-root . \
+  --base-revision "$(git rev-parse HEAD)" \
+  --source-revision "$(git rev-parse HEAD)" \
+  --capability-delta-dir /tmp/antibody-deltas \
+  --target supportmate \
+  --output /tmp/antibody-assessment.json
+uv run agent-antibody immunity gate \
+  --assessment /tmp/antibody-assessment.json
 ```
 
 The CLI never pushes, opens a PR, or deploys. Those side effects are limited to
@@ -290,3 +308,7 @@ The generic boundary is `ExecutionCase`, `TargetRuntime`, `TargetAdapter`, the
 signed capability contract, target-neutral trace/oracle, attack plan schema,
 antibody proposal schema, and policy compiler. Each target implements that
 boundary with a local runtime, deterministic replay, and a Google ADK adapter.
+
+The MVP connector supports Google ADK only. The core snapshot and delta models
+are SDK-neutral enough to accept future MCP, OpenAI Agents SDK, LangGraph, or
+runtime-tracing connectors, but arbitrary SDKs are not claimed as implemented.

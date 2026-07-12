@@ -7,19 +7,30 @@ import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from agent_antibody.adk_capabilities import capture_target_adk_capabilities
 from agent_antibody.ai_models import AttackArgument, AttackPlan, AttackSuite, AttackTechnique
-from agent_antibody.attack_campaign import attack_policy_blocked, attack_request_observed
+from agent_antibody.attack_campaign import (
+    AttackCaseResult,
+    AttackSuiteMetrics,
+    attack_policy_blocked,
+    attack_request_observed,
+)
+from agent_antibody.candidate_evaluation import (
+    CandidateEvaluationStatus,
+    CandidateEvaluationV2,
+)
 from agent_antibody.contracts import PolicyMode
 from agent_antibody.core_types import JsonObject
-from agent_antibody.generic_runner import run_case
-from agent_antibody.live_pipeline import LivePipelineReport
+from agent_antibody.generic_runner import CaseRun, run_case
+from agent_antibody.manifests import TargetManifest, ToolManifest
 from agent_antibody.policy import PolicyAction, PolicyRules, ToolPolicyRule
-from agent_antibody.portfolio_demo import TargetDemoReport, run_target_demo
+from agent_antibody.policy_compiler import CompiledAntibody
+from agent_antibody.portfolio_demo import run_target_demo
 from agent_antibody.targets.registry import TARGET_IDS, get_target_adapter
 
 IMMUNITY_DIRECTORY = Path("immunities") / "v1"
@@ -34,6 +45,20 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(?:authorization|x-api-key)\s*:\s*(?:bearer\s+)?\S+"),
     re.compile(r"\b(?:sk|AIza)[-_A-Za-z0-9]{12,}\b"),
 )
+
+
+class ImmunityCampaignReport(Protocol):
+    """Structural boundary accepted by immutable memory capture."""
+
+    target: TargetManifest
+    attack_results: tuple[AttackCaseResult, ...]
+    suite_metrics: AttackSuiteMetrics
+    normal: CaseRun
+    antibody: CompiledAntibody
+    acceptance_passed: bool
+
+    @property
+    def evaluation_harness(self) -> str: ...
 
 
 def _canonical_json(value: object) -> bytes:
@@ -177,17 +202,66 @@ class RegressionExpectation(BaseModel):
         return AttackSuite(attacks=tuple(attack.to_plan() for attack in self.attacks))
 
 
+class ReferencedToolContract(BaseModel):
+    """Captured runtime contract for a tool governed by one immunity memory."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    input_schema: JsonObject
+    mutates_state: Literal[True] = True
+
+    @classmethod
+    def from_manifest(cls, tool: ToolManifest) -> ReferencedToolContract:
+        if not tool.mutates_state:
+            raise ValueError("immunity memory can only capture state-changing tools")
+        return cls(
+            name=tool.name,
+            input_schema=tool.input_schema,
+        )
+
+
+class ReferencedManifestContract(BaseModel):
+    """The exact tool schemas a v2 artifact needs in order to remain replayable."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tools: tuple[ReferencedToolContract, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def require_canonical_tools(self) -> ReferencedManifestContract:
+        names = tuple(tool.name for tool in self.tools)
+        if names != tuple(sorted(set(names))):
+            raise ValueError("referenced manifest tools must be unique and sorted")
+        return self
+
+    @classmethod
+    def capture(
+        cls,
+        manifest: TargetManifest,
+        *,
+        tool_names: set[str],
+    ) -> ReferencedManifestContract:
+        return cls(
+            tools=tuple(
+                ReferencedToolContract.from_manifest(manifest.tool(name))
+                for name in sorted(tool_names)
+            )
+        )
+
+
 class ImmunityArtifact(BaseModel):
     """Immutable policy and regression memory captured from a successful campaign."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     artifact_id: str
     target_id: str
     source_revision: str
     source_fingerprint: str
     manifest_sha256: str
+    manifest_contract: ReferencedManifestContract | None = None
     report_sha256: str
     evaluation_harness: str
     captured_at: datetime
@@ -211,12 +285,26 @@ class ImmunityArtifact(BaseModel):
             raise ValueError("report_sha256 does not match immutable policy and regression data")
         if self.artifact_id != self.expected_artifact_id():
             raise ValueError("artifact_id does not match immutable artifact content")
+        referenced_tools = {attack.expected_tool for attack in self.regression.attacks}.union(
+            rule.tool for rule in self.policy.rules
+        )
+        if self.schema_version == 1:
+            if self.manifest_contract is not None:
+                raise ValueError("schema v1 artifacts cannot contain a manifest contract")
+        elif self.manifest_contract is None:
+            raise ValueError("schema v2 artifacts require a referenced manifest contract")
+        else:
+            captured_tools = {tool.name for tool in self.manifest_contract.tools}
+            if captured_tools != referenced_tools:
+                raise ValueError(
+                    "manifest contract must contain exactly the policy and attack tools"
+                )
         for attack in self.regression.attacks:
             attack.validate_secret_boundary()
         return self
 
     def identity_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "target_id": self.target_id,
             "source_revision": self.source_revision,
@@ -227,6 +315,9 @@ class ImmunityArtifact(BaseModel):
             "policy": self.policy.model_dump(mode="json"),
             "regression": self.regression.model_dump(mode="json"),
         }
+        if self.manifest_contract is not None:
+            payload["manifest_contract"] = self.manifest_contract.model_dump(mode="json")
+        return payload
 
     def expected_artifact_id(self) -> str:
         return f"imm-{self.target_id}-{_digest(self.identity_payload())[:20]}"
@@ -271,7 +362,7 @@ class ImmunityArtifact(BaseModel):
     @classmethod
     def from_report(
         cls,
-        report: TargetDemoReport | LivePipelineReport,
+        report: ImmunityCampaignReport,
         *,
         source_revision: str,
         source_fingerprint: str | None = None,
@@ -304,8 +395,9 @@ class ImmunityArtifact(BaseModel):
             attacks=tuple(PersistedAttack.from_plan(result.plan) for result in results),
             normal_case_ids=(report.normal.case.case_id,),
         )
+        manifest = report.target
         suite = regression.attack_suite()
-        suite.validate_for(get_target_adapter(target_id).manifest)
+        suite.validate_for(manifest)
         policy = PersistedPolicy(
             bundle_id=report.antibody.bundle_id,
             rules=report.antibody.rules,
@@ -320,14 +412,21 @@ class ImmunityArtifact(BaseModel):
         }
         report_sha256 = _digest(report_payload)
         manifest_sha256 = _manifest_digest(target_id)
+        manifest_contract = ReferencedManifestContract.capture(
+            manifest,
+            tool_names={attack.expected_tool for attack in regression.attacks}.union(
+                rule.tool for rule in policy.rules
+            ),
+        )
         source_hash = source_fingerprint or manifest_sha256
         _require_sha256(source_hash, field_name="source_fingerprint")
         identity_payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "target_id": target_id,
             "source_revision": source_revision,
             "source_fingerprint": source_hash,
             "manifest_sha256": manifest_sha256,
+            "manifest_contract": manifest_contract.model_dump(mode="json"),
             "report_sha256": report_sha256,
             "evaluation_harness": getattr(report, "evaluation_harness", "live-gemini-v1"),
             "policy": policy.model_dump(mode="json"),
@@ -336,10 +435,12 @@ class ImmunityArtifact(BaseModel):
         artifact_id = f"imm-{target_id}-{_digest(identity_payload)[:20]}"
         return cls(
             artifact_id=artifact_id,
+            schema_version=2,
             target_id=target_id,
             source_revision=source_revision,
             source_fingerprint=source_hash,
             manifest_sha256=manifest_sha256,
+            manifest_contract=manifest_contract,
             report_sha256=report_sha256,
             evaluation_harness=getattr(report, "evaluation_harness", "live-gemini-v1"),
             captured_at=(captured_at or datetime.now(UTC)).astimezone(UTC),
@@ -350,10 +451,35 @@ class ImmunityArtifact(BaseModel):
     def validate_for_runtime(self) -> None:
         adapter = get_target_adapter(self.target_id)
         manifest = adapter.manifest
-        if self.manifest_sha256 != _manifest_digest(self.target_id):
-            raise ValueError("artifact manifest digest does not match the trusted target manifest")
+        if self.manifest_contract is not None:
+            registered_capabilities = None
+            additional_tools: list[ToolManifest] = []
+            for captured in self.manifest_contract.tools:
+                try:
+                    current = manifest.tool(captured.name)
+                except ValueError:
+                    if registered_capabilities is None:
+                        registered_capabilities = capture_target_adk_capabilities(adapter)
+                    registered = registered_capabilities.tool(captured.name)
+                    current = ToolManifest(
+                        name=registered.name,
+                        description=registered.description,
+                        input_schema=registered.input_schema,
+                        risk_tags=(),
+                        mutates_state=True,
+                    )
+                    additional_tools.append(current)
+                if not current.mutates_state:
+                    raise ValueError(f"referenced tool no longer mutates state: {captured.name}")
+                if _canonical_json(current.input_schema) != _canonical_json(captured.input_schema):
+                    raise ValueError(f"referenced tool input schema changed: {captured.name}")
+            if additional_tools:
+                manifest = manifest.model_copy(
+                    update={"tools": (*manifest.tools, *additional_tools)}
+                )
         suite = self.regression.attack_suite()
-        suite.validate_for(manifest)
+        replay_manifest = manifest.model_copy(update={"attack_profile": None})
+        suite.validate_for(replay_manifest)
         declared_sources = {surface.source_kind for surface in manifest.injection_surfaces}
         unknown_sources = set(self.policy.untrusted_sources).difference(declared_sources)
         if unknown_sources:
@@ -425,10 +551,13 @@ def verify_artifact(artifact: ImmunityArtifact) -> ArtifactVerification:
     normal_cases = adapter.normal_cases()
     expected_normal_case_ids = set(artifact.regression.normal_case_ids)
     actual_normal_case_ids = {case.case_id for case in normal_cases}
-    if expected_normal_case_ids != actual_normal_case_ids:
-        reasons.append("normal_case_set_changed")
+    missing_normal_case_ids = expected_normal_case_ids.difference(actual_normal_case_ids)
+    if missing_normal_case_ids:
+        reasons.append("normal_case_removed")
     healthy_normal_cases = 0
     for case in normal_cases:
+        if case.case_id not in expected_normal_case_ids:
+            continue
         run = run_case(
             case,
             adapter=adapter,
@@ -443,14 +572,14 @@ def verify_artifact(artifact: ImmunityArtifact) -> ArtifactVerification:
     passed = (
         not reasons
         and blocked_attacks == artifact.regression.attack_count
-        and healthy_normal_cases == len(normal_cases)
+        and healthy_normal_cases == len(expected_normal_case_ids)
     )
     return ArtifactVerification(
         artifact_id=artifact.artifact_id,
         target_id=artifact.target_id,
         attack_count=artifact.regression.attack_count,
         blocked_attacks=blocked_attacks,
-        normal_cases=len(normal_cases),
+        normal_cases=len(expected_normal_case_ids),
         healthy_normal_cases=healthy_normal_cases,
         passed=passed,
         reasons=tuple(reasons),
@@ -597,6 +726,39 @@ class ImmunityEvaluation(BaseModel):
     @classmethod
     def from_json(cls, content: str) -> ImmunityEvaluation:
         return cls.model_validate_json(content)
+
+
+def validate_assessment_remediation_binding(
+    assessment: CandidateEvaluationV2,
+    remediation: ImmunityEvaluation,
+) -> None:
+    """Bind a fail-closed assessment to the exact immutable artifacts it authorizes."""
+
+    if assessment.status != CandidateEvaluationStatus.BYPASS_CONFIRMED:
+        raise ValueError("only BYPASS_CONFIRMED may authorize remediation artifacts")
+    if assessment.source_revision != remediation.source_revision:
+        raise ValueError("assessment and remediation source revisions differ")
+    references = {
+        reference.artifact_id: reference for reference in assessment.remediation_artifacts
+    }
+    candidates = {candidate.artifact.artifact_id: candidate for candidate in remediation.candidates}
+    if set(references) != set(candidates):
+        raise ValueError("assessment and remediation artifact sets differ")
+    for artifact_id, reference in references.items():
+        artifact = candidates[artifact_id].artifact
+        if candidates[artifact_id].action != "create":
+            raise ValueError("bypass remediation must create one new immutable artifact")
+        if artifact.target_id != reference.target_id:
+            raise ValueError("assessment remediation target does not match artifact")
+        if artifact.report_sha256 != reference.report_sha256:
+            raise ValueError("assessment remediation report digest does not match artifact")
+        if tuple(rule.rule_id for rule in artifact.policy.rules) != reference.policy_rule_ids:
+            raise ValueError("assessment remediation policy rules do not match artifact")
+        if (
+            tuple(attack.plan_id for attack in artifact.regression.attacks)
+            != reference.regression_plan_ids
+        ):
+            raise ValueError("assessment remediation regressions do not match artifact")
 
 
 def _normalize_changed_path(value: str) -> str:
@@ -867,15 +1029,23 @@ class SnapshotMemorySeed(BaseModel):
 
 
 class SnapshotSuiteMetrics(BaseModel):
-    """Fixed public summary; raw prompts, traces, and outputs never enter a snapshot."""
+    """Cumulative public summary; raw prompts and traces never enter a snapshot."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    total: Literal[10] = 10
-    success_before: Literal[10] = 10
-    success_after: Literal[0] = 0
-    confirmed_blocked: Literal[10] = 10
-    normal_success: Literal[1] = 1
+    total: int = Field(ge=1)
+    success_before: int = Field(ge=0)
+    success_after: int = Field(ge=0)
+    confirmed_blocked: int = Field(ge=0)
+    normal_success: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_cumulative_gate(self) -> SnapshotSuiteMetrics:
+        if self.success_before != self.total:
+            raise ValueError("snapshot requires every stored attack to have infected before policy")
+        if self.success_after != 0 or self.confirmed_blocked != self.total:
+            raise ValueError("snapshot requires every stored attack to be blocked after policy")
+        return self
 
 
 class SnapshotMemory(BaseModel):
@@ -905,10 +1075,15 @@ class SnapshotTarget(BaseModel):
 
     target_id: str
     name: str
-    dangerous_tools: tuple[str, ...]
+    connector: Literal["google-adk"] = "google-adk"
+    capability_sha256: str
+    registered_tools: tuple[str, ...]
+    governed_tools: tuple[str, ...]
     rules: tuple[ToolPolicyRule, ...]
     suite_metrics: SnapshotSuiteMetrics
     memory_count: int = Field(ge=1)
+    active_memory_count: int = Field(ge=0)
+    pending_memory_count: int = Field(ge=0)
     latest_memory: SnapshotMemory
 
     @model_validator(mode="after")
@@ -918,9 +1093,28 @@ class SnapshotTarget(BaseModel):
         adapter = get_target_adapter(self.target_id)
         if self.name != adapter.manifest.name:
             raise ValueError("snapshot target name does not match the registered target")
-        expected_tools = tuple(tool.name for tool in adapter.manifest.tools if tool.mutates_state)
-        if self.dangerous_tools != expected_tools:
-            raise ValueError("snapshot dangerous tools do not match the registered target")
+        _require_sha256(self.capability_sha256, field_name="snapshot capability_sha256")
+        if self.registered_tools != tuple(sorted(set(self.registered_tools))):
+            raise ValueError("snapshot registered tools must be unique and sorted")
+        expected_governed = tuple(sorted({rule.tool for rule in self.rules}))
+        if self.governed_tools != expected_governed:
+            raise ValueError("snapshot governed tools do not match effective policy")
+        if self.active_memory_count + self.pending_memory_count != self.memory_count:
+            raise ValueError("snapshot active and pending memory must equal projected memory")
+        return self
+
+
+class SnapshotMemoryProjection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_id: str
+    active: int = Field(ge=0)
+    pending: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_target(self) -> SnapshotMemoryProjection:
+        if self.target_id not in TARGET_IDS:
+            raise ValueError("snapshot memory projection target is not registered")
         return self
 
 
@@ -928,6 +1122,13 @@ class SnapshotLifecycle(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     state: Literal["baseline", "verified_pending_review", "release_ready"] = "baseline"
+    evaluation_status: Literal[
+        "RELEASE_READY",
+        "REVALIDATED",
+        "BYPASS_CONFIRMED",
+        "INCONCLUSIVE",
+    ] = "RELEASE_READY"
+    memory_projections: tuple[SnapshotMemoryProjection, ...] = ()
     source_pr_number: int | None = Field(default=None, ge=1)
     source_pr_url: str | None = None
     remediation_branch: str | None = None
@@ -936,6 +1137,13 @@ class SnapshotLifecycle(BaseModel):
 
     @model_validator(mode="after")
     def validate_links(self) -> SnapshotLifecycle:
+        target_ids = tuple(projection.target_id for projection in self.memory_projections)
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("snapshot memory projections must have unique targets")
+        if any(projection.pending for projection in self.memory_projections) and (
+            self.state != "verified_pending_review" or self.evaluation_status != "BYPASS_CONFIRMED"
+        ):
+            raise ValueError("pending memory requires a confirmed bypass awaiting review")
         for field_name in (
             "source_pr_url",
             "remediation_pr_url",
@@ -956,7 +1164,7 @@ class SnapshotLifecycle(BaseModel):
 class ImmunitySnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     generated_at: datetime
     source_revision: str
     lifecycle: SnapshotLifecycle
@@ -982,6 +1190,10 @@ def create_snapshot(
 ) -> ImmunitySnapshot:
     _require_revision(source_revision)
     artifacts = load_artifacts(repository_root=repository_root)
+    effective_lifecycle = lifecycle or SnapshotLifecycle()
+    projections = {
+        projection.target_id: projection for projection in effective_lifecycle.memory_projections
+    }
     targets: list[SnapshotTarget] = []
     for target_id in TARGET_IDS:
         target_artifacts = [artifact for artifact in artifacts if artifact.target_id == target_id]
@@ -991,7 +1203,22 @@ def create_snapshot(
             artifact.validate_for_runtime()
         latest = max(target_artifacts, key=lambda artifact: artifact.captured_at)
         adapter = get_target_adapter(target_id)
-        dangerous_tools = tuple(tool.name for tool in adapter.manifest.tools if tool.mutates_state)
+        capabilities = capture_target_adk_capabilities(adapter)
+        effective_policy = load_effective_policy(
+            repository_root=repository_root,
+            target_id=target_id,
+        )
+        projection = projections.get(target_id)
+        active_memory_count = projection.active if projection is not None else len(target_artifacts)
+        pending_memory_count = projection.pending if projection is not None else 0
+        if active_memory_count + pending_memory_count != len(target_artifacts):
+            raise ValueError("snapshot memory projection does not match immutable artifacts")
+        normal_case_ids = {
+            case_id
+            for artifact in target_artifacts
+            for case_id in artifact.regression.normal_case_ids
+        }
+        total_attacks = sum(artifact.regression.attack_count for artifact in target_artifacts)
         seed = next(
             attack
             for attack in latest.regression.attacks
@@ -1001,13 +1228,20 @@ def create_snapshot(
             SnapshotTarget(
                 target_id=target_id,
                 name=adapter.manifest.name,
-                dangerous_tools=dangerous_tools,
-                rules=load_effective_policy(
-                    repository_root=repository_root,
-                    target_id=target_id,
-                ).rules,
-                suite_metrics=SnapshotSuiteMetrics(),
+                capability_sha256=capabilities.digest(),
+                registered_tools=tuple(tool.name for tool in capabilities.tools),
+                governed_tools=tuple(sorted({rule.tool for rule in effective_policy.rules})),
+                rules=effective_policy.rules,
+                suite_metrics=SnapshotSuiteMetrics(
+                    total=total_attacks,
+                    success_before=total_attacks,
+                    success_after=0,
+                    confirmed_blocked=total_attacks,
+                    normal_success=len(normal_case_ids),
+                ),
                 memory_count=len(target_artifacts),
+                active_memory_count=active_memory_count,
+                pending_memory_count=pending_memory_count,
                 latest_memory=SnapshotMemory(
                     artifact_id=latest.artifact_id,
                     source_revision=latest.source_revision,
@@ -1023,10 +1257,13 @@ def create_snapshot(
                 ),
             )
         )
+    unused_projections = set(projections).difference(target.target_id for target in targets)
+    if unused_projections:
+        raise ValueError("snapshot memory projection references a target without memory")
     return ImmunitySnapshot(
         generated_at=datetime.now(UTC),
         source_revision=source_revision,
-        lifecycle=lifecycle or SnapshotLifecycle(),
+        lifecycle=effective_lifecycle,
         targets=tuple(targets),
     )
 

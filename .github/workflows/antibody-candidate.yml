@@ -40,8 +40,17 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Check out base immunity without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: base
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -57,30 +66,70 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" \
+            git -C candidate diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" \
               | LC_ALL=C sort -u > "$RUNNER_TEMP/changed-files.txt"
           else
-            git ls-files src/agent_antibody | LC_ALL=C sort -u > "$RUNNER_TEMP/changed-files.txt"
+            git -C candidate ls-files src/agent_antibody \
+              | LC_ALL=C sort -u > "$RUNNER_TEMP/changed-files.txt"
           fi
 
-      - name: Evaluate candidate with read-only credentials
+      - name: Capture Base and Head ADK capability surfaces
         env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           TARGET: ${{ github.event.inputs.target || 'auto' }}
         run: |
-          uv sync --locked --dev
-          uv run --locked agent-antibody immunity evaluate \
-            --repository-root . \
+          uv sync --project candidate --locked --dev
+          uv sync --project base --locked --dev
+          mkdir -p "$RUNNER_TEMP/candidate-output/capabilities/base"
+          mkdir -p "$RUNNER_TEMP/candidate-output/capabilities/head"
+          mkdir -p "$RUNNER_TEMP/candidate-output/capability-deltas"
+          if [ "$TARGET" = "auto" ]; then
+            uv run --project candidate --locked agent-antibody immunity affected \
+              --changed-files "$RUNNER_TEMP/changed-files.txt" \
+              --output "$RUNNER_TEMP/affected-targets.json"
+          elif [ "$TARGET" = "all" ]; then
+            printf '%s\n' '["opsmate","repomate","supportmate"]' \
+              > "$RUNNER_TEMP/affected-targets.json"
+          else
+            jq -n --arg target "$TARGET" '[ $target ]' \
+              > "$RUNNER_TEMP/affected-targets.json"
+          fi
+          while IFS= read -r target; do
+            uv run --project base --locked agent-antibody capabilities capture \
+              --target "$target" \
+              --output "$RUNNER_TEMP/candidate-output/capabilities/base/$target.json"
+            uv run --project candidate --locked agent-antibody capabilities capture \
+              --target "$target" \
+              --output "$RUNNER_TEMP/candidate-output/capabilities/head/$target.json"
+            uv run --project candidate --locked agent-antibody capabilities diff \
+              --base "$RUNNER_TEMP/candidate-output/capabilities/base/$target.json" \
+              --head "$RUNNER_TEMP/candidate-output/capabilities/head/$target.json" \
+              --output "$RUNNER_TEMP/candidate-output/capability-deltas/$target.json"
+          done < <(jq -r '.[]' "$RUNNER_TEMP/affected-targets.json")
+          TARGET_ARGS=()
+          while IFS= read -r target; do
+            TARGET_ARGS+=(--target "$target")
+          done < <(jq -r '.[]' "$RUNNER_TEMP/affected-targets.json")
+          uv run --project candidate --locked agent-antibody immunity assess \
+            --memory-repository-root base \
+            --base-revision "$BASE_SHA" \
             --source-revision "$HEAD_SHA" \
-            --changed-files "$RUNNER_TEMP/changed-files.txt" \
-            --target "$TARGET" \
-            --output "$RUNNER_TEMP/evaluation.json"
-          jq '{source_revision, targets: [.candidates[] | {target_id: .artifact.target_id, artifact_id: .artifact.artifact_id, action}], requires_remediation: ([.candidates[] | select(.action == "create")] | length > 0)}' "$RUNNER_TEMP/evaluation.json"
+            --capability-delta-dir "$RUNNER_TEMP/candidate-output/capability-deltas" \
+            "${TARGET_ARGS[@]}" \
+            --output "$RUNNER_TEMP/candidate-output/assessment.json"
+          jq '{status, current_memory_count: ([.targets[].current_memory_count] | add), proposed_memory_count: ([.targets[].proposed_memory_count] | add), targets: [.targets[] | {target_id, status, current_memory_count, proposed_memory_count, inconclusive_reasons}]}' \
+            "$RUNNER_TEMP/candidate-output/assessment.json"
 
       - name: Upload data-only candidate evaluation
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: antibody-candidate-evaluation
-          path: ${{ runner.temp }}/evaluation.json
+          path: ${{ runner.temp }}/candidate-output
           if-no-files-found: error
           retention-days: 1
+
+      - name: Apply the fail-closed candidate gate
+        run: |
+          uv run --project candidate --locked agent-antibody immunity gate \
+            --assessment "$RUNNER_TEMP/candidate-output/assessment.json"

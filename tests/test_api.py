@@ -126,7 +126,7 @@ def test_immunity_snapshot_endpoint_reads_only_allowlisted_artifact(
     serialized = response.text
     assert "payload" not in serialized
     assert "agent_result" not in serialized
-    assert "attachment_text" not in serialized
+    assert '"attachment_text":' not in serialized
 
 
 def test_live_endpoint_is_disabled_and_requires_json() -> None:

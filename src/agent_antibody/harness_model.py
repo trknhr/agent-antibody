@@ -9,6 +9,7 @@ sequence during candidate and regression evaluation.
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import AsyncGenerator
 
 from google.adk.models.base_llm import BaseLlm
@@ -25,6 +26,10 @@ HARNESS_ID = "adk-scripted-v1"
 # no provider token-usage record.  It is expected for this harness and would
 # otherwise bury the policy result in CI logs.
 logging.getLogger("google_adk.google.adk.telemetry._metrics").setLevel(logging.ERROR)
+warnings.filterwarnings(
+    "ignore",
+    message=(r"\[EXPERIMENTAL\] feature FeatureName\.JSON_SCHEMA_FOR_FUNC_DECL is enabled\."),
+)
 
 
 class ScriptedHarnessLlm(BaseLlm):

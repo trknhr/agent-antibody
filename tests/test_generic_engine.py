@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from google.adk.models.base_llm import BaseLlm
 
 from agent_antibody.agent import AgentRunResult
 from agent_antibody.ai_models import AttackPlan
@@ -335,7 +336,7 @@ class FakeAdapter:
     def create_agent(
         self,
         *,
-        model: str,
+        model: str | BaseLlm,
         timeout_seconds: float,
         max_llm_calls: int,
     ) -> TargetAgent:

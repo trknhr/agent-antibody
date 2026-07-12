@@ -1,9 +1,11 @@
 {
-  "schema_version": 1,
-  "generated_at": "2026-07-11T22:11:44.903756Z",
+  "schema_version": 2,
+  "generated_at": "2026-07-12T07:23:04.790353Z",
   "source_revision": "1baf832f14d5fadf8ec5ee0155e482dd8ea173b7",
   "lifecycle": {
     "state": "baseline",
+    "evaluation_status": "RELEASE_READY",
+    "memory_projections": [],
     "source_pr_number": null,
     "source_pr_url": null,
     "remediation_branch": null,
@@ -14,8 +16,16 @@
     {
       "target_id": "opsmate",
       "name": "OpsMate",
-      "dangerous_tools": [
+      "connector": "google-adk",
+      "capability_sha256": "4da7c16e43eeb90eada9c4e5cf9be0db5a19991f0c902fd47128b0c6ca907165",
+      "registered_tools": [
+        "get_service_status",
         "post_issue",
+        "read_logs",
+        "read_runbook",
+        "scale_service"
+      ],
+      "governed_tools": [
         "scale_service"
       ],
       "rules": [
@@ -44,6 +54,8 @@
         "normal_success": 1
       },
       "memory_count": 1,
+      "active_memory_count": 1,
+      "pending_memory_count": 0,
       "latest_memory": {
         "artifact_id": "imm-opsmate-da2bc6be731f3998001c",
         "source_revision": "1baf832f14d5fadf8ec5ee0155e482dd8ea173b7",
@@ -61,9 +73,16 @@
     {
       "target_id": "repomate",
       "name": "RepoMate",
-      "dangerous_tools": [
+      "connector": "google-adk",
+      "capability_sha256": "191eba809f000a9431981c0a72aae790c8034c22f95987597b691c8d9b4dfec9",
+      "registered_tools": [
         "delete_file",
-        "post_comment"
+        "post_comment",
+        "read_file",
+        "read_issue"
+      ],
+      "governed_tools": [
+        "delete_file"
       ],
       "rules": [
         {
@@ -91,6 +110,8 @@
         "normal_success": 1
       },
       "memory_count": 1,
+      "active_memory_count": 1,
+      "pending_memory_count": 0,
       "latest_memory": {
         "artifact_id": "imm-repomate-38f6d28bfbc021792347",
         "source_revision": "1baf832f14d5fadf8ec5ee0155e482dd8ea173b7",
@@ -108,9 +129,18 @@
     {
       "target_id": "supportmate",
       "name": "SupportMate",
-      "dangerous_tools": [
+      "connector": "google-adk",
+      "capability_sha256": "1df0bb9bacab0d0cd8dd78b97586b3c880d54b729d91c79b89f6b9763856be89",
+      "registered_tools": [
+        "get_order",
         "issue_refund",
+        "read_attachment_text",
+        "read_refund_policy",
+        "read_ticket",
         "reply_to_customer"
+      ],
+      "governed_tools": [
+        "issue_refund"
       ],
       "rules": [
         {
@@ -138,6 +168,8 @@
         "normal_success": 1
       },
       "memory_count": 1,
+      "active_memory_count": 1,
+      "pending_memory_count": 0,
       "latest_memory": {
         "artifact_id": "imm-supportmate-f39e99d38aea0305a38f",
         "source_revision": "1baf832f14d5fadf8ec5ee0155e482dd8ea173b7",

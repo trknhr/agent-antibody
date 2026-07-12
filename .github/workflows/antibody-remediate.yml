@@ -17,7 +17,7 @@ concurrency:
 jobs:
   create-immunity-pr:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.conclusion != 'cancelled' &&
       github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -85,16 +85,35 @@ jobs:
       - name: Validate artifact binding before trusted apply
         if: steps.source.outputs.eligible == 'true'
         env:
+          BASE_SHA: ${{ steps.source.outputs.base_sha }}
           HEAD_SHA: ${{ steps.source.outputs.head_sha }}
         run: |
-          EVALUATION=candidate-artifact/evaluation.json
-          test -f "$EVALUATION"
-          test "$(wc -c < "$EVALUATION")" -le 1048576
-          test "$(jq -r '.source_revision' "$EVALUATION")" = "$HEAD_SHA"
-          jq -e '.schema_version == 1 and (.candidates | type == "array")' "$EVALUATION" >/dev/null
+          ASSESSMENT=candidate-artifact/assessment.json
+          test -f "$ASSESSMENT"
+          test "$(wc -c < "$ASSESSMENT")" -le 1048576
+          test "$(jq -r '.base_revision' "$ASSESSMENT")" = "$BASE_SHA"
+          test "$(jq -r '.source_revision' "$ASSESSMENT")" = "$HEAD_SHA"
+          jq -e '.schema_version == 2 and (.targets | type == "array") and (.status == "REVALIDATED" or .status == "BYPASS_CONFIRMED" or .status == "INCONCLUSIVE")' "$ASSESSMENT" >/dev/null
+
+      - name: Select only a verified bypass for remediation
+        id: assessment
+        if: steps.source.outputs.eligible == 'true'
+        run: |
+          STATUS="$(jq -r '.status' candidate-artifact/assessment.json)"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          if [ "$STATUS" != "BYPASS_CONFIRMED" ]; then
+            echo "remediate=false" >> "$GITHUB_OUTPUT"
+            echo "Candidate status is $STATUS; no immunity pull request will be created."
+            exit 0
+          fi
+          test -f candidate-artifact/remediation.json
+          test "$(wc -c < candidate-artifact/remediation.json)" -le 1048576
+          echo "remediate=true" >> "$GITHUB_OUTPUT"
 
       - name: Install trusted control-plane dependencies
-        if: steps.source.outputs.eligible == 'true'
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true'
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.28"
@@ -102,7 +121,9 @@ jobs:
           enable-cache: true
 
       - name: Audit source pull request immutable memory
-        if: steps.source.outputs.eligible == 'true'
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true'
         env:
           BASE_SHA: ${{ steps.source.outputs.base_sha }}
           HEAD_SHA: ${{ steps.source.outputs.head_sha }}
@@ -115,7 +136,9 @@ jobs:
             --head-revision "$HEAD_SHA"
 
       - name: Apply only validated immunity files
-        if: steps.source.outputs.eligible == 'true'
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true'
         env:
           PR_NUMBER: ${{ steps.source.outputs.pr_number }}
           HEAD_SHA: ${{ steps.source.outputs.head_sha }}
@@ -126,7 +149,8 @@ jobs:
           uv sync --locked --dev
           BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
           uv run --locked agent-antibody immunity apply \
-            --evaluation "$GITHUB_WORKSPACE/candidate-artifact/evaluation.json" \
+            --evaluation "$GITHUB_WORKSPACE/candidate-artifact/remediation.json" \
+            --assessment "$GITHUB_WORKSPACE/candidate-artifact/assessment.json" \
             --repository-root "$GITHUB_WORKSPACE/candidate" \
             --lifecycle-state verified_pending_review \
             --source-pr-number "$PR_NUMBER" \
@@ -138,7 +162,9 @@ jobs:
 
       - name: Create stacked immunity pull request
         id: create_immunity_pr
-        if: steps.source.outputs.eligible == 'true'
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.source.outputs.pr_number }}
@@ -190,6 +216,7 @@ jobs:
       - name: Link the immutable snapshot to the generated pull request
         if: >-
           steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true' &&
           steps.create_immunity_pr.outputs.created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -202,7 +229,8 @@ jobs:
           test -n "$PR_URL"
           BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
           uv run --locked agent-antibody immunity apply \
-            --evaluation "$GITHUB_WORKSPACE/candidate-artifact/evaluation.json" \
+            --evaluation "$GITHUB_WORKSPACE/candidate-artifact/remediation.json" \
+            --assessment "$GITHUB_WORKSPACE/candidate-artifact/assessment.json" \
             --repository-root "$GITHUB_WORKSPACE/candidate" \
             --lifecycle-state verified_pending_review \
             --source-pr-number "$PR_NUMBER" \
