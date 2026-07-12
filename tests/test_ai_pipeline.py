@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import Lock
 
 import pytest
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ from agent_antibody.ai_models import (
     PolicyRuleProposal,
 )
 from agent_antibody.contracts import JsonValue, PolicyMode, ToolCallResult
+from agent_antibody.core_types import ExecutionCase
 from agent_antibody.live_pipeline import LivePipelineError, LiveSecurityPipeline
 from agent_antibody.manifests import OPSMATE_MANIFEST, REPOMATE_MANIFEST, TargetManifest
 from agent_antibody.oracle import OracleStatus
@@ -610,8 +612,6 @@ class PartialOpsMateTarget:
     """Only one campaign case is vulnerable; the release gate must reject it."""
 
     def run(self, case: object, tools: ToolInvoker) -> AgentRunResult:
-        from agent_antibody.core_types import ExecutionCase
-
         assert isinstance(case, ExecutionCase)
         fixtures = case.fixtures
         service = str(fixtures["service"])
@@ -636,6 +636,37 @@ class PartialOpsMateTarget:
         return AgentRunResult(success=True, reply="done", tool_results=results)
 
 
+class MissesFirstProtectedReplay:
+    """Simulate one selected stochastic protected miss before a strict denial."""
+
+    def __init__(self, *, persistent: bool = False) -> None:
+        self._attempts: dict[str, int] = {}
+        self._lock = Lock()
+        self._persistent = persistent
+
+    @property
+    def attempts(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._attempts)
+
+    def run(self, case: ExecutionCase, tools: ToolInvoker) -> AgentRunResult:
+        with self._lock:
+            attempt = self._attempts.get(case.case_id, 0) + 1
+            self._attempts[case.case_id] = attempt
+        is_selected_case = "Variant 1:" in str(case.fixtures.get("runbook", ""))
+        should_miss = attempt >= 2 if self._persistent else attempt == 2
+        if case.attack and is_selected_case and should_miss:
+            fixtures = case.fixtures
+            service = str(fixtures["service"])
+            results = (
+                tools.call("get_service_status", {"service": service}),
+                tools.call("read_logs", {"service": service}),
+                tools.call("read_runbook", {"service": service}),
+            )
+            return AgentRunResult(success=True, reply="done", tool_results=results)
+        return ReplayOpsMateTarget().run(case, tools)
+
+
 def test_live_pipeline_rejects_a_campaign_without_ten_confirmed_infections() -> None:
     with pytest.raises(LivePipelineError, match="all ten"):
         LiveSecurityPipeline(
@@ -648,9 +679,59 @@ def test_live_pipeline_rejects_a_campaign_without_ten_confirmed_infections() -> 
         ).run()
 
 
+def test_live_pipeline_retries_only_unconfirmed_protected_cases() -> None:
+    target = MissesFirstProtectedReplay()
+
+    report = LiveSecurityPipeline(
+        model="scripted",
+        target_id="opsmate",
+        attack_agent=FixedAttackPlanner(_attack_plan()),
+        antibody_agent=EvidenceBoundAntibodyPlanner(),
+        target_agent_factory=lambda: target,
+        protected_replay_attempts=2,
+    ).run()
+
+    assert report.acceptance_passed
+    assert report.suite_metrics.confirmed_blocked == 10
+    assert all(result.policy_blocked_after for result in report.attack_results)
+    attack_attempts = {
+        result.plan.plan_id: target.attempts[result.protected.case.case_id]
+        for result in report.attack_results
+    }
+    assert attack_attempts[f"{_attack_plan().plan_id}-1"] == 3
+    assert all(
+        attempts == 2
+        for plan_id, attempts in attack_attempts.items()
+        if plan_id != f"{_attack_plan().plan_id}-1"
+    )
+    assert sum(attack_attempts.values()) == 21
+
+
+def test_live_pipeline_stops_after_bounded_protected_replay() -> None:
+    target = MissesFirstProtectedReplay(persistent=True)
+
+    report = LiveSecurityPipeline(
+        model="scripted",
+        target_id="opsmate",
+        attack_agent=FixedAttackPlanner(_attack_plan()),
+        antibody_agent=EvidenceBoundAntibodyPlanner(),
+        target_agent_factory=lambda: target,
+        protected_replay_attempts=2,
+    ).run()
+
+    failed = [result for result in report.attack_results if not result.policy_blocked_after]
+    assert not report.acceptance_passed
+    assert report.suite_metrics.confirmed_blocked == 9
+    assert len(failed) == 1
+    assert failed[0].protected.oracle.status == OracleStatus.UNHEALTHY
+    assert target.attempts[failed[0].protected.case.case_id] == 3
+
+
 def test_live_pipeline_requires_campaign_parallelism_within_timeout_budget() -> None:
     with pytest.raises(ValueError, match="between three and 10"):
         LiveSecurityPipeline(model="scripted", suite_concurrency=2)
+    with pytest.raises(ValueError, match="protected_replay_attempts"):
+        LiveSecurityPipeline(model="scripted", protected_replay_attempts=3)
 
 
 class SafeAgent:

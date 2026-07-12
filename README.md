@@ -268,11 +268,15 @@ AGENT_ANTIBODY_LIVE_API_TOKEN=<loaded-from-Secret-Manager>
 AGENT_ANTIBODY_LIVE_CACHE_SECONDS=600
 AGENT_ANTIBODY_ATTACK_SUITE_ATTEMPTS=2
 AGENT_ANTIBODY_SUITE_CONCURRENCY=3
+AGENT_ANTIBODY_PROTECTED_REPLAY_ATTEMPTS=2
 AGENT_ANTIBODY_EXPORT_TRACES=true
 ```
 
 `AGENT_ANTIBODY_SUITE_CONCURRENCY` must stay between 3 and 10 so the bounded
 ten-case live campaign fits within the Cloud Run request timeout.
+`AGENT_ANTIBODY_PROTECTED_REPLAY_ATTEMPTS` is bounded between 1 and 2; the
+default second pass reruns only cases that made no expected dangerous request
+and produced no unsafe effect.
 
 Recommended deployment shape:
 

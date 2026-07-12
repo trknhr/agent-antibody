@@ -74,6 +74,7 @@ class LiveSecurityPipeline:
         target_max_llm_calls: int = 12,
         attack_suite_attempts: int = 2,
         suite_concurrency: int = 3,
+        protected_replay_attempts: int = 2,
         target_agent_factory: Callable[[], TargetAgent] | None = None,
     ) -> None:
         if not 1 <= attack_suite_attempts <= 2:
@@ -83,6 +84,8 @@ class LiveSecurityPipeline:
         # two suite attempts, protected replay, and the utility case.
         if not 3 <= suite_concurrency <= ATTACK_CASE_COUNT:
             raise ValueError(f"suite_concurrency must be between three and {ATTACK_CASE_COUNT}")
+        if not 1 <= protected_replay_attempts <= 2:
+            raise ValueError("protected_replay_attempts must be between one and two")
         adapter = target_adapter or get_target_adapter(target_id or "opsmate")
         if target_id is not None and adapter.manifest.target_id != target_id:
             raise ValueError("target_id does not match the injected target adapter")
@@ -95,6 +98,7 @@ class LiveSecurityPipeline:
         self._target_max_llm_calls = target_max_llm_calls
         self._attack_suite_attempts = attack_suite_attempts
         self._suite_concurrency = suite_concurrency
+        self._protected_replay_attempts = protected_replay_attempts
         self._target_agent_factory = target_agent_factory
 
     def _target_agent(self) -> TargetAgent:
@@ -135,6 +139,50 @@ class LiveSecurityPipeline:
         workers = min(self._suite_concurrency, len(cases))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             return tuple(executor.map(execute, cases))
+
+    def _run_protected_cases(
+        self,
+        cases: tuple[ExecutionCase, ...],
+        *,
+        rules: PolicyRules,
+        policy_id: str,
+        cloud_trace_id: str | None,
+    ) -> tuple[CaseRun, ...]:
+        """Retry only stochastic misses with no dangerous request or unsafe effect."""
+
+        selected = list(
+            self._run_cases(
+                cases,
+                rules=rules,
+                phase="protected",
+                cloud_trace_id=cloud_trace_id,
+                policy_id=policy_id,
+            )
+        )
+        for replay_number in range(2, self._protected_replay_attempts + 1):
+            retry_indexes = tuple(
+                index
+                for index, run in enumerate(selected)
+                if (
+                    run.oracle.status in {OracleStatus.ATTACK_MISSED, OracleStatus.UNHEALTHY}
+                    and not run.oracle.attack_succeeded
+                    and run.oracle.dangerous_request_count == 0
+                    and run.oracle.unauthorized_effect_count == 0
+                    and not attack_request_observed(run)
+                )
+            )
+            if not retry_indexes:
+                break
+            retry_runs = self._run_cases(
+                tuple(cases[index] for index in retry_indexes),
+                rules=rules,
+                phase=f"protected-replay-{replay_number}",
+                cloud_trace_id=cloud_trace_id,
+                policy_id=policy_id,
+            )
+            for index, retry_run in zip(retry_indexes, retry_runs, strict=True):
+                selected[index] = retry_run
+        return tuple(selected)
 
     def run(self, *, cloud_trace_id: str | None = None) -> LivePipelineReport:
         manifest = self._adapter.manifest
@@ -201,12 +249,12 @@ class LiveSecurityPipeline:
             manifest=manifest,
             evidence=evidence,
         )
-        protected_runs = self._run_cases(
+        policy_rule_ids = tuple(rule.rule_id for rule in antibody.rules)
+        protected_runs = self._run_protected_cases(
             attack_cases,
             rules=antibody.policy(),
-            phase="protected",
-            cloud_trace_id=cloud_trace_id,
             policy_id=antibody.bundle_id,
+            cloud_trace_id=cloud_trace_id,
         )
 
         normal_cases = self._adapter.normal_cases()
@@ -236,7 +284,7 @@ class LiveSecurityPipeline:
                 request_observed_after=attack_request_observed(protected),
                 policy_blocked_after=attack_policy_blocked(
                     protected,
-                    policy_rule_ids=tuple(rule.rule_id for rule in antibody.rules),
+                    policy_rule_ids=policy_rule_ids,
                 ),
                 memory_seed=index == seed_index,
             )
