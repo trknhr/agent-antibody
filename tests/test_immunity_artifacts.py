@@ -8,6 +8,17 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from agent_antibody.candidate_evaluation import (
+    AttackCohort,
+    AttackDisposition,
+    CandidateAttackEvidence,
+    CandidateEvaluationV2,
+    CandidateNormalTaskEvidence,
+    CandidateTargetEvidence,
+    CandidateToolRequestEvidence,
+    RemediationArtifactReference,
+    TargetCandidateEvaluation,
+)
 from agent_antibody.enforcement import run_with_persisted_immunity
 from agent_antibody.immunity_artifacts import (
     CandidateImmunity,
@@ -386,6 +397,114 @@ def test_trusted_apply_rejects_an_empty_or_unbound_candidate(tmp_path: Path) -> 
             trusted_source_revision=SOURCE_REVISION,
             trusted_changed_paths=changed_paths,
         )
+
+
+def test_trusted_apply_accepts_one_remediation_after_full_target_assessment(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src" / "agent_antibody"
+    source.mkdir(parents=True)
+    (source / "candidate.py").write_text("# candidate source\n", encoding="utf-8")
+    fingerprint = source_fingerprint(repository_root=tmp_path, target_id="supportmate")
+    artifact = ImmunityArtifact.from_report(
+        run_target_demo("supportmate"),
+        source_revision=SOURCE_REVISION,
+        source_fingerprint=fingerprint,
+        captured_at=CAPTURED_AT,
+    )
+    evaluation = ImmunityEvaluation(
+        source_revision=SOURCE_REVISION,
+        changed_paths=("src/agent_antibody/ai_agents.py",),
+        evaluated_at=CAPTURED_AT,
+        candidates=(CandidateImmunity(action="create", artifact=artifact),),
+    )
+
+    def revalidated(target_id: str) -> TargetCandidateEvaluation:
+        return TargetCandidateEvaluation.revalidated(
+            target_id=target_id,
+            current_memory_count=1,
+            evidence=CandidateTargetEvidence(
+                existing_policy_artifact_ids=(f"imm-{target_id}-existing",),
+                attacks=(
+                    CandidateAttackEvidence(
+                        plan_id=f"{target_id}-existing-attack",
+                        cohort=AttackCohort.CANDIDATE,
+                        disposition=AttackDisposition.POLICY_BLOCKED,
+                        expected_tool="existing_tool",
+                        requests=(
+                            CandidateToolRequestEvidence(
+                                request_id=f"{target_id}-request",
+                                tool="existing_tool",
+                                policy_blocked=True,
+                            ),
+                        ),
+                    ),
+                ),
+                normal_tasks=(
+                    CandidateNormalTaskEvidence(
+                        case_id=f"{target_id}-normal",
+                        healthy=True,
+                        observed_tools=("existing_tool",),
+                    ),
+                ),
+            ),
+        )
+
+    reference = RemediationArtifactReference(
+        artifact_id=artifact.artifact_id,
+        target_id="supportmate",
+        report_sha256=artifact.report_sha256,
+        policy_rule_ids=tuple(rule.rule_id for rule in artifact.policy.rules),
+        regression_plan_ids=tuple(plan.plan_id for plan in artifact.regression.attacks),
+    )
+    supportmate = TargetCandidateEvaluation.bypass_confirmed(
+        target_id="supportmate",
+        current_memory_count=1,
+        evidence=CandidateTargetEvidence(
+            existing_policy_artifact_ids=("imm-supportmate-existing",),
+            attack_surface_change_ids=("ADDED_TOOL:grant_store_credit",),
+            attacks=(
+                CandidateAttackEvidence(
+                    plan_id=artifact.regression.attacks[0].plan_id,
+                    cohort=AttackCohort.CANDIDATE,
+                    disposition=AttackDisposition.BYPASS_CONFIRMED,
+                    expected_tool=artifact.regression.attacks[0].expected_tool,
+                    requests=(
+                        CandidateToolRequestEvidence(
+                            request_id="supportmate-bypass-request",
+                            tool=artifact.regression.attacks[0].expected_tool,
+                            executed=True,
+                            changed_state=True,
+                            unsafe_state_change=True,
+                        ),
+                    ),
+                    finding_codes=("unsafe_state_change",),
+                ),
+            ),
+            normal_tasks=(
+                CandidateNormalTaskEvidence(
+                    case_id="supportmate-normal",
+                    healthy=True,
+                    observed_tools=(artifact.regression.attacks[0].expected_tool,),
+                ),
+            ),
+        ),
+        remediation_artifact=reference,
+    )
+    assessment = CandidateEvaluationV2.from_targets(
+        base_revision=SOURCE_REVISION,
+        source_revision=SOURCE_REVISION,
+        evaluated_at=CAPTURED_AT,
+        targets=(revalidated("opsmate"), revalidated("repomate"), supportmate),
+    )
+
+    validate_evaluation_for_apply(
+        evaluation,
+        repository_root=tmp_path,
+        assessment=assessment,
+        trusted_source_revision=SOURCE_REVISION,
+        trusted_changed_paths=("src/agent_antibody/ai_agents.py",),
+    )
 
 
 def test_snapshot_rejects_unallowlisted_nested_content(tmp_path: Path) -> None:

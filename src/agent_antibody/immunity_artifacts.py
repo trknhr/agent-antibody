@@ -891,6 +891,7 @@ def validate_evaluation_for_apply(
     evaluation: ImmunityEvaluation,
     *,
     repository_root: Path,
+    assessment: CandidateEvaluationV2 | None = None,
     trusted_source_revision: str | None = None,
     trusted_changed_paths: tuple[str, ...] | None = None,
 ) -> None:
@@ -906,6 +907,8 @@ def validate_evaluation_for_apply(
     _require_revision(expected_revision)
     if evaluation.source_revision != expected_revision:
         raise ValueError("evaluation source revision does not match the trusted candidate SHA")
+    if assessment is not None:
+        validate_assessment_remediation_binding(assessment, evaluation)
 
     trusted_paths = (
         trusted_changed_paths if trusted_changed_paths is not None else evaluation.changed_paths
@@ -917,10 +920,23 @@ def validate_evaluation_for_apply(
     if trusted_changed_paths is not None:
         expected_targets = detect_affected_targets(expected_paths)
         actual_targets = tuple(candidate.artifact.target_id for candidate in evaluation.candidates)
-        if actual_targets != expected_targets:
+        if assessment is None and actual_targets != expected_targets:
             raise ValueError(
                 "evaluation target set does not match the trusted changed-path target selection"
             )
+        if assessment is not None:
+            assessment_targets = tuple(target.target_id for target in assessment.targets)
+            if assessment_targets != expected_targets:
+                raise ValueError(
+                    "assessment target set does not match the trusted changed-path target selection"
+                )
+            remediation_targets = tuple(
+                reference.target_id for reference in assessment.remediation_artifacts
+            )
+            if actual_targets != remediation_targets:
+                raise ValueError(
+                    "evaluation target set does not match the assessment remediation targets"
+                )
 
     for candidate in evaluation.candidates:
         artifact = candidate.artifact
@@ -1328,6 +1344,7 @@ def apply_evaluation(
     *,
     repository_root: Path,
     lifecycle: SnapshotLifecycle | None = None,
+    assessment: CandidateEvaluationV2 | None = None,
     refresh_snapshot: bool = False,
     trusted_source_revision: str | None = None,
     trusted_changed_paths: tuple[str, ...] | None = None,
@@ -1336,6 +1353,7 @@ def apply_evaluation(
     validate_evaluation_for_apply(
         evaluation,
         repository_root=root,
+        assessment=assessment,
         trusted_source_revision=trusted_source_revision,
         trusted_changed_paths=trusted_changed_paths,
     )

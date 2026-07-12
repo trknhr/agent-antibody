@@ -453,3 +453,54 @@ class CandidateEvaluationV2(BaseModel):
     @classmethod
     def from_json(cls, content: str) -> CandidateEvaluationV2:
         return cls.model_validate_json(content)
+
+
+def merge_candidate_evaluations(
+    *,
+    base: CandidateEvaluationV2,
+    replacement: CandidateEvaluationV2,
+) -> CandidateEvaluationV2:
+    """Replace incomplete target results with delta-specific evaluation evidence.
+
+    The base pass covers every target selected from the trusted pull-request diff.
+    A delta campaign may only replace a target that was intentionally held
+    ``INCONCLUSIVE`` because it needs new attack evidence; it cannot overwrite a
+    revalidated target or silently drop another target from the release gate.
+    """
+
+    if base.base_revision != replacement.base_revision:
+        raise ValueError("assessment base revisions differ")
+    if base.source_revision != replacement.source_revision:
+        raise ValueError("assessment source revisions differ")
+
+    replacements = {target.target_id: target for target in replacement.targets}
+    base_targets = {target.target_id: target for target in base.targets}
+    unknown_targets = sorted(set(replacements).difference(base_targets))
+    if unknown_targets:
+        raise ValueError(
+            "replacement assessment contains targets outside the base selection: "
+            + ", ".join(unknown_targets)
+        )
+
+    for target_id, candidate in replacements.items():
+        original = base_targets[target_id]
+        if original.status != CandidateEvaluationStatus.INCONCLUSIVE:
+            raise ValueError("only an inconclusive target may be replaced by a delta assessment")
+        if candidate.status not in {
+            CandidateEvaluationStatus.BYPASS_CONFIRMED,
+            CandidateEvaluationStatus.INCONCLUSIVE,
+        }:
+            raise ValueError("delta assessment must remain inconclusive or confirm one bypass")
+        if (
+            candidate.evidence.attack_surface_change_ids
+            != original.evidence.attack_surface_change_ids
+        ):
+            raise ValueError("replacement assessment attack-surface changes differ from base")
+
+    merged_targets = tuple(replacements.get(target.target_id, target) for target in base.targets)
+    return CandidateEvaluationV2.from_targets(
+        base_revision=base.base_revision,
+        source_revision=base.source_revision,
+        evaluated_at=max(base.evaluated_at, replacement.evaluated_at),
+        targets=merged_targets,
+    )

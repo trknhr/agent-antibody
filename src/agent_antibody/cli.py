@@ -15,6 +15,7 @@ from agent_antibody.candidate_evaluation import (
     CandidateEvaluationV2,
     CandidateTargetEvidence,
     TargetCandidateEvaluation,
+    merge_candidate_evaluations,
 )
 from agent_antibody.capabilities import (
     AttackSurfaceDelta,
@@ -320,6 +321,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Target to assess; repeat for multiple targets (default: all)",
     )
     assess.add_argument("--output", type=Path, required=True)
+    merge_assessments = immunity_subparsers.add_parser(
+        "merge-assessments",
+        help="Replace inconclusive target results with a delta-specific assessment",
+    )
+    merge_assessments.add_argument("--base", type=Path, required=True)
+    merge_assessments.add_argument("--replacement", type=Path, required=True)
+    merge_assessments.add_argument("--output", type=Path, required=True)
     affected = immunity_subparsers.add_parser(
         "affected",
         help="Resolve changed repository paths to registered security targets",
@@ -797,11 +805,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 evaluation,
                 repository_root=cast(Path, args.repository_root),
                 lifecycle=lifecycle,
+                assessment=assessment,
                 refresh_snapshot=cast(bool, args.refresh_snapshot),
                 trusted_source_revision=cast(str | None, args.trusted_source_revision),
                 trusted_changed_paths=trusted_changed_paths,
             )
             print(json.dumps({"written": [str(path) for path in written]}, ensure_ascii=False))
+            return 0
+
+        if immunity_command == "merge-assessments":
+            base = CandidateEvaluationV2.from_json(
+                cast(Path, args.base).read_text(encoding="utf-8")
+            )
+            replacement = CandidateEvaluationV2.from_json(
+                cast(Path, args.replacement).read_text(encoding="utf-8")
+            )
+            merged = merge_candidate_evaluations(base=base, replacement=replacement)
+            output = cast(Path, args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(merged.to_json(), encoding="utf-8")
+            print(
+                json.dumps(
+                    {
+                        "status": merged.status.value,
+                        "targets": [
+                            {"target_id": target.target_id, "status": target.status.value}
+                            for target in merged.targets
+                        ],
+                        "output": str(output),
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return 0
 
         if immunity_command == "verify":

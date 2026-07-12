@@ -17,6 +17,7 @@ from agent_antibody.candidate_evaluation import (
     RemediationArtifactReference,
     TargetCandidateEvaluation,
     aggregate_candidate_status,
+    merge_candidate_evaluations,
 )
 
 BASE_REVISION = "a" * 40
@@ -395,3 +396,56 @@ def test_aggregate_rejects_a_forged_status_and_duplicate_targets() -> None:
 def test_aggregate_requires_at_least_one_target() -> None:
     with pytest.raises(ValueError, match="at least one target"):
         aggregate_candidate_status(())
+
+
+def test_merge_replaces_only_an_inconclusive_target_and_preserves_full_coverage() -> None:
+    incomplete_supportmate = TargetCandidateEvaluation.inconclusive(
+        target_id="supportmate",
+        current_memory_count=1,
+        evidence=_evidence(attacks=(), normal_tasks=()),
+        reasons=("delta-specific attack campaign required",),
+    )
+    base = CandidateEvaluationV2.from_targets(
+        base_revision=BASE_REVISION,
+        source_revision=SOURCE_REVISION,
+        evaluated_at=EVALUATED_AT,
+        targets=(
+            _revalidated("opsmate"),
+            _revalidated("repomate"),
+            incomplete_supportmate,
+        ),
+    )
+    replacement = CandidateEvaluationV2.from_targets(
+        base_revision=BASE_REVISION,
+        source_revision=SOURCE_REVISION,
+        evaluated_at=EVALUATED_AT,
+        targets=(_bypass("supportmate"),),
+    )
+
+    merged = merge_candidate_evaluations(base=base, replacement=replacement)
+
+    assert merged.status == CandidateEvaluationStatus.BYPASS_CONFIRMED
+    assert [target.status for target in merged.targets] == [
+        CandidateEvaluationStatus.REVALIDATED,
+        CandidateEvaluationStatus.REVALIDATED,
+        CandidateEvaluationStatus.BYPASS_CONFIRMED,
+    ]
+    assert merged.remediation_artifacts == (_remediation(),)
+
+
+def test_merge_rejects_replacing_a_revalidated_target() -> None:
+    base = CandidateEvaluationV2.from_targets(
+        base_revision=BASE_REVISION,
+        source_revision=SOURCE_REVISION,
+        evaluated_at=EVALUATED_AT,
+        targets=(_revalidated(),),
+    )
+    replacement = CandidateEvaluationV2.from_targets(
+        base_revision=BASE_REVISION,
+        source_revision=SOURCE_REVISION,
+        evaluated_at=EVALUATED_AT,
+        targets=(_bypass(),),
+    )
+
+    with pytest.raises(ValueError, match="only an inconclusive target"):
+        merge_candidate_evaluations(base=base, replacement=replacement)
