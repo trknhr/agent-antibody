@@ -104,3 +104,13 @@ def test_deploy_gate_runs_two_bounded_uncached_campaigns() -> None:
     assert "for attempt in 1 2" in script
     assert "Live Gemini release gate failed after two bounded campaigns" in script
     assert ".suite_metrics.confirmed_blocked == 10" in script
+
+
+def test_pull_request_ci_defers_only_the_snapshot_projection() -> None:
+    jobs = _mapping(_workflow("ci.yml")["jobs"])
+    regression = _step(_mapping(jobs["test"]), "Execute generated antibody regression")
+    script = cast(str, regression["run"])
+
+    assert 'if [ "$GITHUB_EVENT_NAME" = "pull_request" ]' in script
+    assert "--allow-stale-snapshot" in script
+    assert "agent-antibody immunity verify --repository-root ." in script

@@ -186,6 +186,12 @@ verifies that all ten attacks are blocked by a policy rule while normal utility
 remains healthy. It also verifies the dashboard snapshot and fails if any
 registered target has no memory.
 
+While a pull request introduces a newly observed ADK capability, its snapshot
+still truthfully represents the Base release until the trusted remediation PR
+adds memory and refreshes that projection. Pull-request CI therefore uses
+`--allow-stale-snapshot` to replay immutable artifacts only; main and deploy
+verification remain snapshot-strict.
+
 The merged artifacts are the policy input for target hosts:
 
 ```python

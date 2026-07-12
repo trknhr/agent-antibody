@@ -57,7 +57,12 @@ jobs:
           uv run --locked agent-antibody portfolio
           uv run --locked agent-antibody demo --output .generated-antibodies
           uv run --locked agent-antibody regression .generated-antibodies/*.yaml
-          uv run --locked agent-antibody immunity verify --repository-root .
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            SNAPSHOT_ARGS=(--allow-stale-snapshot)
+          else
+            SNAPSHOT_ARGS=()
+          fi
+          uv run --locked agent-antibody immunity verify --repository-root . "${SNAPSHOT_ARGS[@]}"
 
       - name: Build package
         run: uv build

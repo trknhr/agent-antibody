@@ -292,6 +292,14 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=(*TARGET_IDS, "all"),
         default="all",
     )
+    verify.add_argument(
+        "--allow-stale-snapshot",
+        action="store_true",
+        help=(
+            "Verify immutable artifacts but defer snapshot validation until trusted remediation "
+            "updates a candidate capability delta"
+        ),
+    )
     verify.add_argument("--json", action="store_true")
 
     audit = immunity_subparsers.add_parser(
@@ -854,7 +862,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             verification_results = tuple(verify_artifact(artifact) for artifact in artifacts)
             snapshot_error: str | None = None
-            if selected == "all":
+            snapshot_checked = selected == "all" and not cast(bool, args.allow_stale_snapshot)
+            if snapshot_checked:
                 try:
                     verify_snapshot(repository_root=cast(Path, args.repository_root))
                 except (FileNotFoundError, ValueError) as error:
@@ -868,6 +877,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             ],
                             "missing_targets": list(missing_targets),
                             "snapshot_error": snapshot_error,
+                            "snapshot_checked": snapshot_checked,
                         },
                         ensure_ascii=False,
                         indent=2,
@@ -885,6 +895,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"FAIL missing immunity memory for: {','.join(missing_targets)}")
                 if snapshot_error is not None:
                     print(f"FAIL snapshot={snapshot_error}")
+                elif selected == "all" and not snapshot_checked:
+                    print("SKIP snapshot=deferred_for_candidate_delta")
             return (
                 0
                 if (
