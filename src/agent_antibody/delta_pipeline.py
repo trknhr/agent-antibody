@@ -74,7 +74,7 @@ class DeltaPipelineReport(BaseModel):
     protected: CaseRun
     normal: CaseRun
     acceptance_passed: bool
-    evaluation_harness: Literal["adk-scripted-v1"] = "adk-scripted-v1"
+    evaluation_harness: Literal["adk-scripted-v1", "live-gemini-v1"] = "adk-scripted-v1"
 
 
 class DeltaEvaluationOutput(BaseModel):
@@ -87,6 +87,26 @@ class DeltaEvaluationOutput(BaseModel):
 
 class DeltaPipelineError(RuntimeError):
     pass
+
+
+def _repairable_generate(
+    planner: DeltaAttackPlanner,
+    *,
+    manifest: TargetManifest,
+    delta: AttackSurfaceDelta,
+    capability: AdkToolCapability,
+    validation_feedback: tuple[str, ...],
+):
+    """Use deterministic runner feedback when the concrete planner supports repair."""
+
+    if validation_feedback and isinstance(planner, GeminiDeltaAttackAgent):
+        return planner.generate_with_feedback(
+            manifest=manifest,
+            delta=delta,
+            capability=capability,
+            validation_feedback=validation_feedback,
+        )
+    return planner.generate(manifest=manifest, delta=delta, capability=capability)
 
 
 def _merge_policy(left: PolicyRules, right: PolicyRules) -> PolicyRules:
@@ -137,9 +157,16 @@ class DeltaSecurityPipeline:
         antibody_agent: AntibodyPlanner | None = None,
         compiler: PolicyCompiler | None = None,
         attack_suite_attempts: int = 2,
+        target_model: str | None = None,
+        target_timeout_seconds: float = 45.0,
+        target_max_llm_calls: int = 12,
     ) -> None:
         if not 1 <= attack_suite_attempts <= 2:
             raise ValueError("attack_suite_attempts must be between one and two")
+        if target_timeout_seconds <= 0:
+            raise ValueError("target_timeout_seconds must be positive")
+        if target_max_llm_calls < 1:
+            raise ValueError("target_max_llm_calls must be positive")
         self.model = model
         self._adapter = adapter
         self._memory_root = memory_repository_root
@@ -148,6 +175,9 @@ class DeltaSecurityPipeline:
         self._antibody_agent = antibody_agent or GeminiAntibodyAgent(model=model)
         self._compiler = compiler or PolicyCompiler()
         self._attack_suite_attempts = attack_suite_attempts
+        self._target_model = target_model
+        self._target_timeout_seconds = target_timeout_seconds
+        self._target_max_llm_calls = target_max_llm_calls
 
     def _run(self, case: object, *, rules: PolicyRules, protected: bool) -> CaseRun:
         from agent_antibody.core_types import ExecutionCase
@@ -159,7 +189,15 @@ class DeltaSecurityPipeline:
             adapter=self._adapter,
             mode=PolicyMode.ENFORCE,
             rules=rules,
-            agent=self._adapter.create_harness_agent(case, protected=protected),
+            agent=(
+                self._adapter.create_agent(
+                    model=self._target_model,
+                    timeout_seconds=self._target_timeout_seconds,
+                    max_llm_calls=self._target_max_llm_calls,
+                )
+                if self._target_model is not None
+                else self._adapter.create_harness_agent(case, protected=protected)
+            ),
         )
 
     def run(
@@ -213,16 +251,27 @@ class DeltaSecurityPipeline:
         suite = None
         attack_cases = None
         vulnerable_runs = None
-        for _attempt in range(self._attack_suite_attempts):
+        attempt_failures: list[str] = []
+        validation_feedback: tuple[str, ...] = ()
+        for attempt in range(self._attack_suite_attempts):
             try:
-                generated = self._attack_agent.generate(
+                generated = _repairable_generate(
+                    self._attack_agent,
                     manifest=self._adapter.manifest,
                     delta=delta,
                     capability=capability,
+                    validation_feedback=validation_feedback,
                 )
                 generated.validate_for(attack_manifest)
                 cases = tuple(self._adapter.materialize_attack(plan) for plan in generated.attacks)
-            except ValueError:
+            except ValueError as error:
+                # Keep the failure diagnostic structural: it explains why a generated
+                # candidate was rejected without persisting or echoing an attacker payload.
+                attempt_failures.append(
+                    "attempt "
+                    f"{attempt + 1}: generated suite rejected ({type(error).__name__}: {error})"
+                )
+                validation_feedback = (str(error),)
                 continue
             runs = tuple(self._run(case, rules=active_policy, protected=False) for case in cases)
             if len(runs) == ATTACK_COUNT and all(
@@ -232,9 +281,14 @@ class DeltaSecurityPipeline:
                 attack_cases = cases
                 vulnerable_runs = runs
                 break
+            statuses = ",".join(run.oracle.status.value for run in runs)
+            attempt_failures.append(
+                f"attempt {attempt + 1}: expected {ATTACK_COUNT} infections, got [{statuses}]"
+            )
         if suite is None or attack_cases is None or vulnerable_runs is None:
+            detail = "; ".join(attempt_failures) or "no attack suite was generated"
             raise DeltaPipelineError(
-                "delta-specific attack suite did not confirm ten deterministic bypasses"
+                "delta-specific attack suite did not confirm ten deterministic bypasses: " + detail
             )
 
         seed_run = vulnerable_runs[0]
@@ -324,6 +378,9 @@ class DeltaSecurityPipeline:
             protected=protected_runs[0],
             normal=tool_normal_runs[0],
             acceptance_passed=True,
+            evaluation_harness=(
+                "live-gemini-v1" if self._target_model is not None else "adk-scripted-v1"
+            ),
         )
         artifact = ImmunityArtifact.from_report(
             report,

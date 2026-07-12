@@ -339,6 +339,13 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate_delta.add_argument("--changed-files", type=Path, required=True)
     evaluate_delta.add_argument("--capability-delta", type=Path, required=True)
     evaluate_delta.add_argument("--output-dir", type=Path, required=True)
+    evaluate_delta.add_argument(
+        "--live-target",
+        action="store_true",
+        help="Run the changed target through Gemini instead of the credential-free ADK harness",
+    )
+    evaluate_delta.add_argument("--target-timeout", type=float, default=45.0)
+    evaluate_delta.add_argument("--target-max-llm-calls", type=int, default=12)
     return parser
 
 
@@ -545,6 +552,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     adapter=get_target_adapter(target_id),
                     memory_repository_root=memory_root,
                     candidate_repository_root=cast(Path, args.candidate_repository_root),
+                    target_model=model if cast(bool, args.live_target) else None,
+                    target_timeout_seconds=cast(float, args.target_timeout),
+                    target_max_llm_calls=cast(int, args.target_max_llm_calls),
                 ).run(
                     base_revision=base_revision,
                     source_revision=source_revision,
@@ -569,7 +579,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     target_id=target_id,
                     current_memory_count=len(artifacts),
                     evidence=evidence,
-                    reasons=(f"delta evaluation failed: {type(error).__name__}",),
+                    reasons=(
+                        f"delta evaluation failed: {type(error).__name__}: {str(error)[:1_000]}",
+                    ),
                 )
                 assessment = CandidateEvaluationV2.from_targets(
                     base_revision=base_revision,

@@ -153,6 +153,7 @@ def test_capture_uses_the_registered_supportmate_adk_surface() -> None:
     assert snapshot.agent_name == "supportmate"
     assert tuple(tool.name for tool in snapshot.tools) == (
         "get_order",
+        "grant_store_credit",
         "issue_refund",
         "read_attachment_text",
         "read_refund_policy",
