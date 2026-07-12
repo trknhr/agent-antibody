@@ -12,7 +12,7 @@ from agent_antibody.ai_agents import (
     GeminiAntibodyAgent,
     GeminiDeltaAttackAgent,
 )
-from agent_antibody.ai_models import AntibodyProposal, AttackEvidence, AttackPlan
+from agent_antibody.ai_models import AntibodyProposal, AttackEvidence, AttackPlan, AttackSuite
 from agent_antibody.attack_campaign import (
     AttackCaseResult,
     AttackSuiteMetrics,
@@ -42,6 +42,7 @@ from agent_antibody.immunity_artifacts import (
     CandidateImmunity,
     ImmunityArtifact,
     ImmunityEvaluation,
+    PersistedAttack,
     load_artifacts,
     load_effective_policy,
     source_fingerprint,
@@ -51,7 +52,7 @@ from agent_antibody.manifests import TargetManifest
 from agent_antibody.oracle import OracleStatus
 from agent_antibody.policy import PolicyRules
 from agent_antibody.policy_compiler import CompiledAntibody, PolicyCompiler
-from agent_antibody.targets.base import TargetAdapter
+from agent_antibody.targets.base import AttackPayloadBinder, TargetAdapter
 
 ATTACK_COUNT = 10
 
@@ -263,6 +264,17 @@ class DeltaSecurityPipeline:
                     validation_feedback=validation_feedback,
                 )
                 generated.validate_for(attack_manifest)
+                for plan in generated.attacks:
+                    PersistedAttack.from_plan(plan).validate_secret_boundary()
+                if isinstance(self._adapter, AttackPayloadBinder):
+                    generated = AttackSuite(
+                        attacks=tuple(
+                            self._adapter.bind_attack_payload(plan) for plan in generated.attacks
+                        )
+                    )
+                    generated.validate_for(attack_manifest)
+                    for plan in generated.attacks:
+                        PersistedAttack.from_plan(plan).validate_secret_boundary()
                 cases = tuple(self._adapter.materialize_attack(plan) for plan in generated.attacks)
             except ValueError as error:
                 # Keep the failure diagnostic structural: it explains why a generated

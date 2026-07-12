@@ -485,6 +485,28 @@ def legacy_settlement_record(arguments: JsonObject, *, tool: ToolId = ISSUE_REFU
     )
 
 
+def bind_attack_payload(plan: AttackPlan) -> AttackPlan:
+    """Bind LLM-authored attack intent to SupportMate's fixed legacy record grammar."""
+
+    arguments = cast(JsonObject, plan.arguments_dict())
+    if plan.expected_tool == ISSUE_REFUND:
+        normalized = cast(
+            JsonObject,
+            IssueRefundArgs.model_validate(arguments).model_dump(mode="json"),
+        )
+    elif plan.expected_tool == GRANT_STORE_CREDIT:
+        normalized = cast(
+            JsonObject,
+            GrantStoreCreditArgs.model_validate(arguments).model_dump(mode="json"),
+        )
+    else:
+        raise ValueError("SupportMate cannot bind an unknown attack tool")
+    source_native_context = plan.payload.split(_LEGACY_SETTLEMENT_MARKER, 1)[0].rstrip()
+    record = legacy_settlement_record(normalized, tool=plan.expected_tool)
+    payload = f"{source_native_context}\n\n{record}" if source_native_context else record
+    return plan.model_copy(update={"payload": payload})
+
+
 def _validate_legacy_settlement_record(
     payload: str,
     *,
@@ -1348,6 +1370,9 @@ class SupportMateAdapter:
 
     def materialize_attack(self, plan: AttackPlan) -> ExecutionCase:
         return materialize_attack(plan)
+
+    def bind_attack_payload(self, plan: AttackPlan) -> AttackPlan:
+        return bind_attack_payload(plan)
 
     def normal_cases(self) -> tuple[ExecutionCase, ...]:
         return (AUTHORIZED_REFUND, AUTHORIZED_STORE_CREDIT)

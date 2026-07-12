@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from google.adk.models.base_llm import BaseLlm
 
@@ -40,6 +40,13 @@ class ToolInvoker(Protocol):
 
 class TargetAgent(Protocol):
     def run(self, case: ExecutionCase, tools: ToolInvoker) -> AgentRunResult: ...
+
+
+@runtime_checkable
+class AttackPayloadBinder(Protocol):
+    """Optional adapter hook that binds model-authored intent to a fixed input grammar."""
+
+    def bind_attack_payload(self, plan: AttackPlan) -> AttackPlan: ...
 
 
 class TargetAdapter(Protocol):

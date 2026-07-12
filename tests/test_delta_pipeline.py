@@ -526,6 +526,49 @@ class _RepairingCreditAttackAgent(GeminiDeltaAttackAgent):
         )
 
 
+class _SecretRepairingCreditAttackAgent(GeminiDeltaAttackAgent):
+    """Returns a non-persistable suite once, then repairs it from feedback."""
+
+    def __init__(self) -> None:
+        self.validation_feedback: list[tuple[str, ...]] = []
+
+    def generate(
+        self,
+        *,
+        manifest: TargetManifest,
+        delta: AttackSurfaceDelta,
+        capability: AdkToolCapability,
+    ) -> AttackSuite:
+        initial = _TenCreditAttacks().generate(
+            manifest=manifest,
+            delta=delta,
+            capability=capability,
+        )
+        return initial.model_copy(
+            update={
+                "attacks": tuple(
+                    attack.model_copy(update={"payload": f"token=super-secret\n{attack.payload}"})
+                    for attack in initial.attacks
+                )
+            }
+        )
+
+    def generate_with_feedback(
+        self,
+        *,
+        manifest: TargetManifest,
+        delta: AttackSurfaceDelta,
+        capability: AdkToolCapability,
+        validation_feedback: tuple[str, ...],
+    ) -> AttackSuite:
+        self.validation_feedback.append(validation_feedback)
+        return _TenCreditAttacks().generate(
+            manifest=manifest,
+            delta=delta,
+            capability=capability,
+        )
+
+
 class _EvidenceBoundCreditAntibody:
     def generate(
         self,
@@ -783,3 +826,34 @@ def test_delta_pipeline_repairs_an_attack_suite_from_oracle_feedback(tmp_path: P
     ]
     assert output.assessment.status == CandidateEvaluationStatus.BYPASS_CONFIRMED
     assert output.report.suite_metrics.success_before == 10
+
+
+def test_delta_pipeline_repairs_a_suite_that_cannot_be_persisted(tmp_path: Path) -> None:
+    repository_root = _REPOSITORY_ROOT
+    memory_root = _memory_root(tmp_path)
+    head = capture_target_adk_capabilities(SUPPORTMATE_ADAPTER)
+    base = head.model_copy(
+        update={"tools": tuple(tool for tool in head.tools if tool.name != GRANT_STORE_CREDIT)}
+    )
+    planner = _SecretRepairingCreditAttackAgent()
+
+    output = DeltaSecurityPipeline(
+        model="fake-gemini-3.5-flash",
+        adapter=SUPPORTMATE_ADAPTER,
+        memory_repository_root=memory_root,
+        candidate_repository_root=repository_root,
+        attack_agent=planner,
+        antibody_agent=_EvidenceBoundCreditAntibody(),
+    ).run(
+        base_revision="7" * 40,
+        source_revision="8" * 40,
+        changed_paths=("src/agent_antibody/targets/supportmate.py",),
+        delta=diff_capability_snapshots(base, head),
+    )
+
+    assert planner.validation_feedback == [
+        ("persisted attack payload appears to contain a secret",)
+    ]
+    assert output.assessment.status == CandidateEvaluationStatus.BYPASS_CONFIRMED
+    for attack in output.remediation.candidates[0].artifact.regression.attacks:
+        attack.validate_secret_boundary()
