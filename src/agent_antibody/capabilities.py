@@ -282,7 +282,6 @@ def diff_capability_snapshots(
                 attack_required=True,
             )
         )
-        attack_required_tools.update(head_tools)
 
     return AttackSurfaceDelta(
         base_snapshot_sha256=base.digest(),

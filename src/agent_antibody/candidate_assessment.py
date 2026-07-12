@@ -11,7 +11,7 @@ from agent_antibody.candidate_evaluation import (
     TargetCandidateEvaluation,
 )
 from agent_antibody.candidate_runner import collect_candidate_evidence
-from agent_antibody.capabilities import AttackSurfaceDelta
+from agent_antibody.capabilities import AttackSurfaceChangeKind, AttackSurfaceDelta
 from agent_antibody.immunity_artifacts import load_artifacts
 from agent_antibody.targets.registry import get_target_adapter
 
@@ -63,6 +63,21 @@ def assess_target_revalidation(
             current_memory_count=0,
             evidence=base_evidence,
             reasons=("target has no existing immunity memory",),
+        )
+
+    instruction_changed = any(
+        change.kind == AttackSurfaceChangeKind.AGENT_INSTRUCTION_CHANGED
+        for change in capability_delta.changes
+    )
+    if instruction_changed and not capability_delta.attack_required_tools:
+        return TargetCandidateEvaluation.inconclusive(
+            target_id=target_id,
+            current_memory_count=current_count,
+            evidence=base_evidence,
+            reasons=(
+                "agent instruction changed without an observed tool delta; "
+                "an expanded attack campaign is required",
+            ),
         )
 
     persisted_plans = tuple(

@@ -62,3 +62,23 @@ def test_new_adk_tool_cannot_be_declared_revalidated_by_an_old_campaign() -> Non
     assert result.inconclusive_reasons == (
         "delta-specific attack campaign required for tools: grant_store_credit",
     )
+
+
+def test_instruction_only_change_fails_closed_until_an_expanded_campaign_exists() -> None:
+    root = Path(__file__).resolve().parents[1]
+    base = capture_target_adk_capabilities(get_target_adapter("supportmate"))
+    head = base.model_copy(update={"instruction_sha256": "c" * 64})
+
+    result = assess_target_revalidation(
+        memory_repository_root=root,
+        target_id="supportmate",
+        source_revision=SOURCE_REVISION,
+        capability_delta=diff_capability_snapshots(base, head),
+    )
+
+    assert result.status == CandidateEvaluationStatus.INCONCLUSIVE
+    assert result.current_memory_count == result.proposed_memory_count == 1
+    assert result.inconclusive_reasons == (
+        "agent instruction changed without an observed tool delta; an expanded attack campaign "
+        "is required",
+    )

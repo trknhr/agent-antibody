@@ -213,7 +213,7 @@ def test_diff_detects_all_supported_changes_and_requires_attacks() -> None:
         AttackSurfaceChangeKind.REMOVED_TOOL,
         AttackSurfaceChangeKind.AGENT_INSTRUCTION_CHANGED,
     )
-    assert delta.attack_required_tools == ("added", "changed", "unchanged")
+    assert delta.attack_required_tools == ("added", "changed")
     assert all(
         change.attack_required
         for change in delta.changes
