@@ -175,3 +175,6 @@ def test_deploy_gate_runs_two_bounded_uncached_campaigns() -> None:
     assert "for attempt in 1 2" in script
     assert "Live Gemini release gate failed after two bounded campaigns" in script
     assert ".suite_metrics.confirmed_blocked == 10" in script
+    source_deploy = _step(deploy, "Deploy source to Cloud Run")
+    env_vars = cast(str, _mapping(source_deploy["with"])["env_vars"])
+    assert "AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS=2" in env_vars

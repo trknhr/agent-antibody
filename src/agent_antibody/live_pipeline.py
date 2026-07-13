@@ -21,7 +21,7 @@ from agent_antibody.attack_campaign import (
     attack_request_observed,
     suite_metrics,
 )
-from agent_antibody.contracts import PolicyMode
+from agent_antibody.contracts import EventType, PolicyMode
 from agent_antibody.core_types import ExecutionCase
 from agent_antibody.generic_runner import CaseRun, run_case
 from agent_antibody.manifests import TargetManifest
@@ -75,6 +75,7 @@ class LiveSecurityPipeline:
         attack_suite_attempts: int = 2,
         suite_concurrency: int = 3,
         protected_replay_attempts: int = 2,
+        normal_replay_attempts: int = 2,
         target_agent_factory: Callable[[], TargetAgent] | None = None,
     ) -> None:
         if not 1 <= attack_suite_attempts <= 2:
@@ -86,6 +87,8 @@ class LiveSecurityPipeline:
             raise ValueError(f"suite_concurrency must be between three and {ATTACK_CASE_COUNT}")
         if not 1 <= protected_replay_attempts <= 2:
             raise ValueError("protected_replay_attempts must be between one and two")
+        if not 1 <= normal_replay_attempts <= 2:
+            raise ValueError("normal_replay_attempts must be between one and two")
         adapter = target_adapter or get_target_adapter(target_id or "opsmate")
         if target_id is not None and adapter.manifest.target_id != target_id:
             raise ValueError("target_id does not match the injected target adapter")
@@ -99,6 +102,7 @@ class LiveSecurityPipeline:
         self._attack_suite_attempts = attack_suite_attempts
         self._suite_concurrency = suite_concurrency
         self._protected_replay_attempts = protected_replay_attempts
+        self._normal_replay_attempts = normal_replay_attempts
         self._target_agent_factory = target_agent_factory
 
     def _target_agent(self) -> TargetAgent:
@@ -184,6 +188,50 @@ class LiveSecurityPipeline:
                 selected[index] = retry_run
         return tuple(selected)
 
+    def _run_normal_case(
+        self,
+        case: ExecutionCase,
+        *,
+        rules: PolicyRules,
+        policy_id: str,
+        cloud_trace_id: str | None,
+    ) -> CaseRun:
+        """Retry only a model no-op in a fresh simulator, never a policy decision."""
+
+        selected: CaseRun | None = None
+        for attempt in range(1, self._normal_replay_attempts + 1):
+            phase = "normal" if attempt == 1 else f"normal-replay-{attempt}"
+            selected = run_case(
+                case,
+                adapter=self._adapter,
+                mode=PolicyMode.ENFORCE,
+                rules=rules,
+                agent=self._target_agent(),
+            )
+            emit_run_trace(
+                selected,
+                phase=phase,
+                target_id=self._adapter.manifest.target_id,
+                policy_id=policy_id,
+                cloud_trace_id=cloud_trace_id,
+            )
+            if not self._retryable_normal_noop(selected):
+                break
+        if selected is None:  # pragma: no cover - constructor requires at least one attempt
+            raise RuntimeError("normal utility evaluation did not run")
+        return selected
+
+    @staticmethod
+    def _retryable_normal_noop(run: CaseRun) -> bool:
+        """Return true only when the model touched neither a tool nor simulator state."""
+
+        return (
+            run.oracle.status == OracleStatus.UNHEALTHY
+            and run.initial_state == run.final_state
+            and len(run.events) == 1
+            and run.events[0].event_type == EventType.RUN_COMPLETED
+        )
+
     def run(self, *, cloud_trace_id: str | None = None) -> LivePipelineReport:
         manifest = self._adapter.manifest
         attack_suite: AttackSuite | None = None
@@ -260,17 +308,9 @@ class LiveSecurityPipeline:
         normal_cases = self._adapter.normal_cases()
         if not normal_cases:
             raise LivePipelineError("target adapter declares no normal utility case")
-        normal = run_case(
+        normal = self._run_normal_case(
             normal_cases[0],
-            adapter=self._adapter,
-            mode=PolicyMode.ENFORCE,
             rules=antibody.policy(),
-            agent=self._target_agent(),
-        )
-        emit_run_trace(
-            normal,
-            phase="normal",
-            target_id=manifest.target_id,
             policy_id=antibody.bundle_id,
             cloud_trace_id=cloud_trace_id,
         )

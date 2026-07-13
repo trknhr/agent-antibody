@@ -42,6 +42,12 @@ def emit_run_trace(
             safe_details = {
                 key: value for key, value in event.payload.items() if key in {"status", "reasons"}
             }
+        elif event.event_type == EventType.RUN_COMPLETED:
+            safe_details = {
+                "agent_success": run.agent_result.success,
+                "normal_task_succeeded": run.oracle.normal_task_succeeded,
+                "oracle_status": run.oracle.status.value,
+            }
         payload: dict[str, JsonValue] = {
             "severity": (
                 "WARNING"

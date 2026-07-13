@@ -294,6 +294,7 @@ AGENT_ANTIBODY_LIVE_CACHE_SECONDS=600
 AGENT_ANTIBODY_ATTACK_SUITE_ATTEMPTS=2
 AGENT_ANTIBODY_SUITE_CONCURRENCY=3
 AGENT_ANTIBODY_PROTECTED_REPLAY_ATTEMPTS=2
+AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS=2
 AGENT_ANTIBODY_EXPORT_TRACES=true
 ```
 
@@ -302,6 +303,10 @@ ten-case live campaign fits within the Cloud Run request timeout.
 `AGENT_ANTIBODY_PROTECTED_REPLAY_ATTEMPTS` is bounded between 1 and 2; the
 default second pass reruns only cases that made no expected dangerous request
 and produced no unsafe effect.
+`AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS` is also bounded between 1 and 2. Its
+second pass is narrower: it runs only when the model made no tool request and
+the fresh simulator state remained unchanged. A policy denial or any attempted
+operation remains a release failure and is never retried.
 
 Recommended deployment shape:
 

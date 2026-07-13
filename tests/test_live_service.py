@@ -37,3 +37,26 @@ def test_failed_live_report_is_not_cached(monkeypatch: MonkeyPatch) -> None:
 
     assert service.run(target_id="supportmate") is second
     assert calls == 2
+
+
+def test_live_service_passes_the_bounded_normal_replay_setting(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    accepted = run_target_demo("supportmate")
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self, *, cloud_trace_id: str | None = None) -> TargetDemoReport:
+            del cloud_trace_id
+            return accepted
+
+    monkeypatch.setenv("AGENT_ANTIBODY_LIVE_ENABLED", "true")
+    monkeypatch.setenv("AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS", "1")
+    monkeypatch.setattr(live_service_module, "LiveSecurityPipeline", FakePipeline)
+
+    LiveDemoService().run(target_id="supportmate")
+
+    assert captured["normal_replay_attempts"] == 1

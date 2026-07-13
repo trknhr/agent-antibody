@@ -63,6 +63,10 @@ class LiveDemoService:
     def protected_replay_attempts(self) -> int:
         return int(os.getenv("AGENT_ANTIBODY_PROTECTED_REPLAY_ATTEMPTS", "2"))
 
+    @property
+    def normal_replay_attempts(self) -> int:
+        return int(os.getenv("AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS", "2"))
+
     def state(self) -> LiveDemoState:
         cached_targets = tuple(
             target_id for target_id in TARGET_IDS if self._cache_valid(target_id)
@@ -101,6 +105,7 @@ class LiveDemoService:
                 attack_suite_attempts=self.attack_suite_attempts,
                 suite_concurrency=self.suite_concurrency,
                 protected_replay_attempts=self.protected_replay_attempts,
+                normal_replay_attempts=self.normal_replay_attempts,
             ).run(cloud_trace_id=cloud_trace_id)
             if report.acceptance_passed:
                 self._cached_reports[target_id] = report
