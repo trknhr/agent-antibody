@@ -226,3 +226,17 @@ def test_deploy_gate_runs_two_bounded_uncached_campaigns() -> None:
     env_vars = cast(str, _mapping(source_deploy["with"])["env_vars"])
     assert "AGENT_ANTIBODY_VULNERABLE_REPLAY_ATTEMPTS=2" in env_vars
     assert "AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS=2" in env_vars
+
+
+def test_pull_request_ci_defers_only_the_snapshot_projection() -> None:
+    jobs = _mapping(_workflow("ci.yml")["jobs"])
+    regression = _step(_mapping(jobs["test"]), "Execute generated antibody regression")
+    env = _mapping(regression["env"])
+    script = cast(str, regression["run"])
+
+    assert env["BASE_SHA"] == "${{ github.event.pull_request.base.sha || '' }}"
+    assert env["HEAD_SHA"] == "${{ github.event.pull_request.head.sha || '' }}"
+    assert 'if [ "$GITHUB_EVENT_NAME" = "pull_request" ]' in script
+    assert 'git diff --quiet "$BASE_SHA...$HEAD_SHA" -- immunities/v1' in script
+    assert "--allow-stale-snapshot" in script
+    assert "agent-antibody immunity verify --repository-root ." in script

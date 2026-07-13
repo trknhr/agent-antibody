@@ -794,7 +794,7 @@ def test_real_supportmate_adk_registration_drives_the_credit_delta_pipeline(tmp_
         and result.protected.oracle.status == OracleStatus.IMMUNE
         for result in output.report.attack_results
     )
-    assert len(SUPPORTMATE_ADAPTER.normal_cases()) == 2
+    assert len(SUPPORTMATE_ADAPTER.normal_cases()) == 3
     output.remediation.candidates[0].artifact.validate_for_runtime()
 
 
