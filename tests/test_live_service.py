@@ -39,7 +39,7 @@ def test_failed_live_report_is_not_cached(monkeypatch: MonkeyPatch) -> None:
     assert calls == 2
 
 
-def test_live_service_passes_the_bounded_normal_replay_setting(
+def test_live_service_passes_the_bounded_replay_settings(
     monkeypatch: MonkeyPatch,
 ) -> None:
     accepted = run_target_demo("supportmate")
@@ -54,9 +54,11 @@ def test_live_service_passes_the_bounded_normal_replay_setting(
             return accepted
 
     monkeypatch.setenv("AGENT_ANTIBODY_LIVE_ENABLED", "true")
+    monkeypatch.setenv("AGENT_ANTIBODY_VULNERABLE_REPLAY_ATTEMPTS", "1")
     monkeypatch.setenv("AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS", "1")
     monkeypatch.setattr(live_service_module, "LiveSecurityPipeline", FakePipeline)
 
     LiveDemoService().run(target_id="supportmate")
 
+    assert captured["vulnerable_replay_attempts"] == 1
     assert captured["normal_replay_attempts"] == 1

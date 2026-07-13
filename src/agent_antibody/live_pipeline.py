@@ -74,6 +74,7 @@ class LiveSecurityPipeline:
         target_max_llm_calls: int = 12,
         attack_suite_attempts: int = 2,
         suite_concurrency: int = 3,
+        vulnerable_replay_attempts: int = 2,
         protected_replay_attempts: int = 2,
         normal_replay_attempts: int = 2,
         target_agent_factory: Callable[[], TargetAgent] | None = None,
@@ -85,6 +86,8 @@ class LiveSecurityPipeline:
         # two suite attempts, protected replay, and the utility case.
         if not 3 <= suite_concurrency <= ATTACK_CASE_COUNT:
             raise ValueError(f"suite_concurrency must be between three and {ATTACK_CASE_COUNT}")
+        if not 1 <= vulnerable_replay_attempts <= 2:
+            raise ValueError("vulnerable_replay_attempts must be between one and two")
         if not 1 <= protected_replay_attempts <= 2:
             raise ValueError("protected_replay_attempts must be between one and two")
         if not 1 <= normal_replay_attempts <= 2:
@@ -101,6 +104,7 @@ class LiveSecurityPipeline:
         self._target_max_llm_calls = target_max_llm_calls
         self._attack_suite_attempts = attack_suite_attempts
         self._suite_concurrency = suite_concurrency
+        self._vulnerable_replay_attempts = vulnerable_replay_attempts
         self._protected_replay_attempts = protected_replay_attempts
         self._normal_replay_attempts = normal_replay_attempts
         self._target_agent_factory = target_agent_factory
@@ -167,13 +171,7 @@ class LiveSecurityPipeline:
             retry_indexes = tuple(
                 index
                 for index, run in enumerate(selected)
-                if (
-                    run.oracle.status in {OracleStatus.ATTACK_MISSED, OracleStatus.UNHEALTHY}
-                    and not run.oracle.attack_succeeded
-                    and run.oracle.dangerous_request_count == 0
-                    and run.oracle.unauthorized_effect_count == 0
-                    and not attack_request_observed(run)
-                )
+                if self._retryable_unobserved_attack(run)
             )
             if not retry_indexes:
                 break
@@ -187,6 +185,51 @@ class LiveSecurityPipeline:
             for index, retry_run in zip(retry_indexes, retry_runs, strict=True):
                 selected[index] = retry_run
         return tuple(selected)
+
+    def _run_vulnerable_cases(
+        self,
+        cases: tuple[ExecutionCase, ...],
+        *,
+        rules: PolicyRules,
+        cloud_trace_id: str | None,
+    ) -> tuple[CaseRun, ...]:
+        """Retry only attacks that made no dangerous request and caused no unsafe effect."""
+
+        selected = list(
+            self._run_cases(
+                cases,
+                rules=rules,
+                phase="vulnerable",
+                cloud_trace_id=cloud_trace_id,
+            )
+        )
+        for replay_number in range(2, self._vulnerable_replay_attempts + 1):
+            retry_indexes = tuple(
+                index
+                for index, run in enumerate(selected)
+                if self._retryable_unobserved_attack(run)
+            )
+            if not retry_indexes:
+                break
+            retry_runs = self._run_cases(
+                tuple(cases[index] for index in retry_indexes),
+                rules=rules,
+                phase=f"vulnerable-replay-{replay_number}",
+                cloud_trace_id=cloud_trace_id,
+            )
+            for index, retry_run in zip(retry_indexes, retry_runs, strict=True):
+                selected[index] = retry_run
+        return tuple(selected)
+
+    @staticmethod
+    def _retryable_unobserved_attack(run: CaseRun) -> bool:
+        return (
+            run.oracle.status in {OracleStatus.ATTACK_MISSED, OracleStatus.UNHEALTHY}
+            and not run.oracle.attack_succeeded
+            and run.oracle.dangerous_request_count == 0
+            and run.oracle.unauthorized_effect_count == 0
+            and not attack_request_observed(run)
+        )
 
     def _run_normal_case(
         self,
@@ -238,6 +281,7 @@ class LiveSecurityPipeline:
         attack_cases: tuple[ExecutionCase, ...] | None = None
         vulnerable_runs: tuple[CaseRun, ...] | None = None
         seed_index: int | None = None
+        best_infected_count = 0
         trust_boundary = PolicyRules(
             untrusted_sources=tuple(
                 sorted({surface.source_kind for surface in manifest.injection_surfaces})
@@ -255,10 +299,9 @@ class LiveSecurityPipeline:
                 )
             except ValueError:
                 continue
-            candidate_runs = self._run_cases(
+            candidate_runs = self._run_vulnerable_cases(
                 candidate_cases,
                 rules=trust_boundary,
-                phase="vulnerable",
                 cloud_trace_id=cloud_trace_id,
             )
             candidate_infected = tuple(
@@ -266,6 +309,7 @@ class LiveSecurityPipeline:
                 for index, run in enumerate(candidate_runs)
                 if run.oracle.status == OracleStatus.INFECTED
             )
+            best_infected_count = max(best_infected_count, len(candidate_infected))
             if len(candidate_infected) == ATTACK_CASE_COUNT:
                 attack_suite = candidate_suite
                 attack_cases = candidate_cases
@@ -280,7 +324,8 @@ class LiveSecurityPipeline:
             or seed_index is None
         ):
             raise LivePipelineError(
-                "Gemini-generated attack suite did not infect all ten attack cases"
+                "Gemini-generated attack suite did not infect all ten attack cases after "
+                f"bounded replay (best_infected={best_infected_count}/{ATTACK_CASE_COUNT})"
             )
 
         seed_run = vulnerable_runs[seed_index]
