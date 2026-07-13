@@ -83,6 +83,38 @@ def test_vertex_job_uses_workflow_pinned_evaluator_and_data_only_handoff() -> No
     assert "delta-evaluation/remediation.json" in merge_script
 
 
+def test_writer_runs_candidate_apply_without_credentials_then_rechecks_out() -> None:
+    jobs = _mapping(_workflow("antibody-remediate.yml")["jobs"])
+    writer = _mapping(jobs["create-immunity-pr"])
+    apply = _step(writer, "Apply and verify immunity in the uncredentialed candidate tree")
+    stage = _step(writer, "Stage candidate-generated immutable memory")
+    recheckout = _step(writer, "Re-check out candidate tree before GitHub write")
+    restore = _step(writer, "Restore staged immutable memory only")
+    create = _step(writer, "Create stacked immunity pull request")
+    link = _step(writer, "Link the immutable snapshot to the generated pull request")
+
+    assert apply["working-directory"] == "candidate"
+    apply_env = _mapping(apply["env"])
+    assert "GH_TOKEN" not in apply_env
+    apply_script = cast(str, apply["run"])
+    assert "uv run --locked agent-antibody immunity apply" in apply_script
+    assert "-u GH_TOKEN" in apply_script
+    assert "-u GITHUB_TOKEN" in apply_script
+    assert "-u GITHUB_ENV" in apply_script
+    assert (
+        "Candidate execution modified source files outside immutable immunity storage."
+        in apply_script
+    )
+
+    assert "prepared-immunity" in cast(str, stage["run"])
+    assert recheckout["uses"] == ("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0")
+    assert _mapping(recheckout["with"])["clean"] == "true"
+    assert "cp -R" in cast(str, restore["run"])
+    assert "git diff --cached --name-status" in cast(str, create["run"])
+    assert "jq --arg pr_url" in cast(str, link["run"])
+    assert "agent-antibody immunity apply" not in cast(str, link["run"])
+
+
 def test_candidate_workflow_never_receives_oidc_or_write_permissions() -> None:
     candidate = _workflow("antibody-candidate.yml")
 
