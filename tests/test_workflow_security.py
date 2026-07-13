@@ -36,6 +36,14 @@ def _step(job: dict[str, object], name: str) -> dict[str, object]:
     )
 
 
+def _steps(job: dict[str, object], name: str) -> tuple[dict[str, object], ...]:
+    return tuple(
+        step
+        for raw_step in _sequence(job["steps"])
+        if (step := _mapping(raw_step)).get("name") == name
+    )
+
+
 def test_remediation_isolates_vertex_identity_from_github_write_job() -> None:
     workflow = _workflow("antibody-remediate.yml")
     jobs = _mapping(workflow["jobs"])
@@ -113,6 +121,37 @@ def test_writer_runs_candidate_apply_without_credentials_then_rechecks_out() -> 
     assert "git diff --cached --name-status" in cast(str, create["run"])
     assert "jq --arg pr_url" in cast(str, link["run"])
     assert "agent-antibody immunity apply" not in cast(str, link["run"])
+
+
+def test_only_the_allowlisted_pr_author_can_trigger_antibody_workflows() -> None:
+    candidate_jobs = _mapping(_workflow("antibody-candidate.yml")["jobs"])
+    candidate = _mapping(candidate_jobs["evaluate"])
+    candidate_condition = cast(str, candidate["if"])
+
+    assert "vars.AGENT_ANTIBODY_ALLOWED_PR_AUTHOR" in candidate_condition
+    assert "github.event.pull_request.user.login" in candidate_condition
+    assert (
+        "github.event.pull_request.head.repo.full_name == github.repository" in candidate_condition
+    )
+    assert "github.actor" in candidate_condition
+
+    remediation_jobs = _mapping(_workflow("antibody-remediate.yml")["jobs"])
+    evaluator = _mapping(remediation_jobs["evaluate_delta"])
+    writer = _mapping(remediation_jobs["create-immunity-pr"])
+    sources = (
+        *_steps(evaluator, "Resolve and bind the source pull request"),
+        *_steps(writer, "Resolve and bind the source pull request"),
+    )
+
+    assert len(sources) == 2
+    for source in sources:
+        assert _mapping(source["env"])["ALLOWED_PR_AUTHOR"] == (
+            "${{ vars.AGENT_ANTIBODY_ALLOWED_PR_AUTHOR }}"
+        )
+        script = cast(str, source["run"])
+        assert "PR_AUTHOR=" in script
+        assert '[ -z "$ALLOWED_PR_AUTHOR" ]' in script
+        assert "Source pull request author is not authorized" in script
 
 
 def test_candidate_workflow_never_receives_oidc_or_write_permissions() -> None:
