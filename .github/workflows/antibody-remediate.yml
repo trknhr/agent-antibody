@@ -430,7 +430,7 @@ jobs:
             --base-revision "$BASE_SHA" \
             --head-revision "$HEAD_SHA"
 
-      - name: Apply only validated immunity files
+      - name: Apply and verify immunity in the uncredentialed candidate tree
         if: >-
           steps.source.outputs.eligible == 'true' &&
           steps.assessment.outputs.remediate == 'true'
@@ -439,11 +439,41 @@ jobs:
           HEAD_SHA: ${{ steps.source.outputs.head_sha }}
           HEAD_REF: ${{ steps.source.outputs.head_ref }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
-        working-directory: control-plane
+        working-directory: candidate
         run: |
-          uv sync --locked --dev
+          input_digest() {
+            find "$GITHUB_WORKSPACE/candidate-artifact" -type f -print0 \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum \
+              | sha256sum \
+              | cut -d ' ' -f 1
+          }
+          INPUT_DIGEST="$(input_digest)"
+          env \
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            -u GITHUB_TOKEN \
+            -u GH_TOKEN \
+            -u GOOGLE_APPLICATION_CREDENTIALS \
+            -u GITHUB_ENV \
+            -u GITHUB_OUTPUT \
+            -u GITHUB_PATH \
+            -u GITHUB_STATE \
+            -u GITHUB_STEP_SUMMARY \
+            uv sync --locked --dev
           BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
-          uv run --locked agent-antibody immunity apply \
+          env \
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            -u GITHUB_TOKEN \
+            -u GH_TOKEN \
+            -u GOOGLE_APPLICATION_CREDENTIALS \
+            -u GITHUB_ENV \
+            -u GITHUB_OUTPUT \
+            -u GITHUB_PATH \
+            -u GITHUB_STATE \
+            -u GITHUB_STEP_SUMMARY \
+            uv run --locked agent-antibody immunity apply \
             --evaluation "$GITHUB_WORKSPACE/candidate-artifact/remediation.json" \
             --assessment "$GITHUB_WORKSPACE/candidate-artifact/assessment.json" \
             --repository-root "$GITHUB_WORKSPACE/candidate" \
@@ -454,6 +484,62 @@ jobs:
             --workflow-run-url "$RUN_URL" \
             --trusted-source-revision "$HEAD_SHA" \
             --trusted-changed-files "$RUNNER_TEMP/trusted-changed-files.txt"
+          test "$(input_digest)" = "$INPUT_DIGEST"
+          if ! git diff --quiet -- . ':(exclude)immunities/v1'; then
+            echo "Candidate execution modified source files outside immutable immunity storage." >&2
+            exit 1
+          fi
+          if git ls-files --others --exclude-standard -- . ':(exclude)immunities/v1' | grep -q .; then
+            echo "Candidate execution created files outside immutable immunity storage." >&2
+            exit 1
+          fi
+
+      - name: Stage candidate-generated immutable memory
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true'
+        run: |
+          STAGE="$RUNNER_TEMP/prepared-immunity"
+          rm -rf -- "$STAGE"
+          test -f candidate/immunities/v1/snapshot.json
+          test ! -L candidate/immunities/v1/snapshot.json
+          if find candidate/immunities/v1 ! -type d ! -type f -print -quit | grep -q .; then
+            echo "Generated immunity storage contains a non-regular path." >&2
+            exit 1
+          fi
+          test "$(du -sb candidate/immunities/v1 | cut -f1)" -le 10485760
+          mkdir -p "$STAGE"
+          cp -R candidate/immunities "$STAGE/"
+
+      - name: Re-check out candidate tree before GitHub write
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.source.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 1
+          clean: true
+
+      - name: Restore staged immutable memory only
+        if: >-
+          steps.source.outputs.eligible == 'true' &&
+          steps.assessment.outputs.remediate == 'true'
+        run: |
+          STAGE="$RUNNER_TEMP/prepared-immunity"
+          test -f "$STAGE/immunities/v1/snapshot.json"
+          test ! -L "$STAGE/immunities/v1/snapshot.json"
+          if find "$STAGE/immunities/v1" ! -type d ! -type f -print -quit | grep -q .; then
+            echo "Staged immunity storage contains a non-regular path." >&2
+            exit 1
+          fi
+          cp -R "$STAGE/immunities" "$GITHUB_WORKSPACE/candidate/"
+          if ! git -C candidate diff --quiet -- . ':(exclude)immunities/v1'; then
+            echo "Restored output modified source files outside immutable immunity storage." >&2
+            exit 1
+          fi
 
       - name: Create stacked immunity pull request
         id: create_immunity_pr
@@ -487,10 +573,16 @@ jobs:
             echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if git diff --cached --name-only | grep -Ev '^immunities/v1/(snapshot\.json|[a-z][a-z0-9-]*/imm-[a-z][a-z0-9-]*-[0-9a-f]{20}\.yaml)$' | grep -q .; then
-            echo "Refusing to commit paths outside immutable immunity storage" >&2
-            exit 1
-          fi
+          while IFS=$'\t' read -r status path; do
+            if [[ "$path" == "immunities/v1/snapshot.json" ]]; then
+              [[ "$status" == "A" || "$status" == "M" ]] || exit 1
+            elif [[ "$path" =~ ^immunities/v1/[a-z][a-z0-9-]*/imm-[a-z][a-z0-9-]*-[0-9a-f]{20}\.yaml$ ]]; then
+              [[ "$status" == "A" ]] || exit 1
+            else
+              echo "Refusing to commit a non-immutable path: $path" >&2
+              exit 1
+            fi
+          done < <(git diff --cached --name-status)
           git -c core.hooksPath=/dev/null config user.name "agent-antibody[bot]"
           git -c core.hooksPath=/dev/null config user.email "agent-antibody[bot]@users.noreply.github.com"
           git -c core.hooksPath=/dev/null commit -m "chore(immunity): add generated regression memory"
@@ -518,32 +610,34 @@ jobs:
           PR_NUMBER: ${{ steps.source.outputs.pr_number }}
           HEAD_SHA: ${{ steps.source.outputs.head_sha }}
           PR_URL: ${{ steps.create_immunity_pr.outputs.pr_url }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
-        working-directory: control-plane
+        working-directory: candidate
         run: |
           test -n "$PR_URL"
           BRANCH="antibody/pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
-          uv run --locked agent-antibody immunity apply \
-            --evaluation "$GITHUB_WORKSPACE/candidate-artifact/remediation.json" \
-            --assessment "$GITHUB_WORKSPACE/candidate-artifact/assessment.json" \
-            --repository-root "$GITHUB_WORKSPACE/candidate" \
-            --lifecycle-state verified_pending_review \
-            --source-pr-number "$PR_NUMBER" \
-            --source-pr-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR_NUMBER" \
-            --remediation-branch "$BRANCH" \
-            --remediation-pr-url "$PR_URL" \
-            --workflow-run-url "$RUN_URL" \
-            --trusted-source-revision "$HEAD_SHA" \
-            --trusted-changed-files "$RUNNER_TEMP/trusted-changed-files.txt" \
-            --refresh-snapshot
-          cd "$GITHUB_WORKSPACE/candidate"
+          SNAPSHOT="immunities/v1/snapshot.json"
+          test -f "$SNAPSHOT"
+          test ! -L "$SNAPSHOT"
+          test "$(jq -r '.source_revision' "$SNAPSHOT")" = "$HEAD_SHA"
+          test "$(jq -r '.lifecycle.source_pr_number' "$SNAPSHOT")" = "$PR_NUMBER"
+          test "$(jq -r '.lifecycle.remediation_branch' "$SNAPSHOT")" = "$BRANCH"
+          test "$(jq -r '.lifecycle.state' "$SNAPSHOT")" = "verified_pending_review"
+          test "$(jq -r '.lifecycle.evaluation_status' "$SNAPSHOT")" = "BYPASS_CONFIRMED"
+          TEMP_SNAPSHOT="$(mktemp)"
+          jq --arg pr_url "$PR_URL" '.lifecycle.remediation_pr_url = $pr_url' \
+            "$SNAPSHOT" > "$TEMP_SNAPSHOT"
+          mv "$TEMP_SNAPSHOT" "$SNAPSHOT"
           git add -- immunities/v1/snapshot.json
           if ! git diff --cached --quiet; then
+            if git diff --cached --name-only | grep -vx 'immunities/v1/snapshot.json' | grep -q .; then
+              echo "Snapshot linkage may only modify the dashboard snapshot." >&2
+              exit 1
+            fi
             git -c core.hooksPath=/dev/null commit -m "chore(immunity): link generated pull request"
             CURRENT_HEAD_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
             if [ "$CURRENT_HEAD_SHA" != "$HEAD_SHA" ]; then
               echo "Source pull request head changed while snapshot linkage was prepared; aborting." >&2
               exit 1
             fi
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git push origin "HEAD:refs/heads/$BRANCH"
           fi
