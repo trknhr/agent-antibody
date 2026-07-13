@@ -15,7 +15,7 @@
     "source_pr_number": 9,
     "source_pr_url": "https://github.com/trknhr/agent-antibody/pull/9",
     "remediation_branch": "antibody/pr-9-8ada94a4e313",
-    "remediation_pr_url": null,
+    "remediation_pr_url": "https://github.com/trknhr/agent-antibody/pull/10",
     "workflow_run_url": "https://github.com/trknhr/agent-antibody/actions/runs/29231733630"
   },
   "targets": [
