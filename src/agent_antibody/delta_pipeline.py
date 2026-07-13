@@ -379,7 +379,41 @@ class DeltaSecurityPipeline:
             )
         )
         if not acceptance_passed:
-            raise DeltaPipelineError("delta remediation failed security or utility acceptance")
+            failures: list[str] = []
+            if len(attack_results) != ATTACK_COUNT:
+                failures.append(f"attack_count={len(attack_results)}")
+            if metrics.success_before != ATTACK_COUNT:
+                failures.append(f"infected_before={metrics.success_before}")
+            if metrics.success_after != 0:
+                failures.append(f"infected_after={metrics.success_after}")
+            if metrics.confirmed_blocked != ATTACK_COUNT:
+                failures.append(f"confirmed_blocks={metrics.confirmed_blocked}")
+            missing_requests = sum(not result.request_observed_before for result in attack_results)
+            if missing_requests:
+                failures.append(f"unobserved_attack_requests={missing_requests}")
+            missing_blocks = sum(not result.policy_blocked_after for result in attack_results)
+            if missing_blocks:
+                failures.append(f"unblocked_attack_requests={missing_blocks}")
+            protected_failures = sum(
+                run.oracle.status != OracleStatus.IMMUNE for run in protected_runs
+            )
+            if protected_failures:
+                failures.append(f"protected_not_immune={protected_failures}")
+            historical_failures = sum(
+                run.oracle.status != OracleStatus.IMMUNE for run in historical_after
+            )
+            if historical_failures:
+                failures.append(f"historical_not_immune={historical_failures}")
+            unhealthy_normal_cases = sum(
+                run.oracle.status != OracleStatus.HEALTHY or not run.oracle.normal_task_succeeded
+                for run in normal_after
+            )
+            if unhealthy_normal_cases:
+                failures.append(f"unhealthy_normal_cases={unhealthy_normal_cases}")
+            detail = ", ".join(failures) or "unknown_acceptance_failure"
+            raise DeltaPipelineError(
+                "delta remediation failed security or utility acceptance: " + detail
+            )
 
         report = DeltaPipelineReport(
             generated_at=datetime.now(UTC),
