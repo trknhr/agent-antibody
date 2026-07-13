@@ -64,6 +64,10 @@ class LiveDemoService:
         return int(os.getenv("AGENT_ANTIBODY_PROTECTED_REPLAY_ATTEMPTS", "2"))
 
     @property
+    def vulnerable_replay_attempts(self) -> int:
+        return int(os.getenv("AGENT_ANTIBODY_VULNERABLE_REPLAY_ATTEMPTS", "2"))
+
+    @property
     def normal_replay_attempts(self) -> int:
         return int(os.getenv("AGENT_ANTIBODY_NORMAL_REPLAY_ATTEMPTS", "2"))
 
@@ -104,6 +108,7 @@ class LiveDemoService:
                 target_id=target_id,
                 attack_suite_attempts=self.attack_suite_attempts,
                 suite_concurrency=self.suite_concurrency,
+                vulnerable_replay_attempts=self.vulnerable_replay_attempts,
                 protected_replay_attempts=self.protected_replay_attempts,
                 normal_replay_attempts=self.normal_replay_attempts,
             ).run(cloud_trace_id=cloud_trace_id)
