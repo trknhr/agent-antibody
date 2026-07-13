@@ -23,6 +23,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: antibody-candidate-${{ github.event.pull_request.number || github.run_id }}
@@ -81,14 +82,151 @@ jobs:
               | LC_ALL=C sort -u > "$RUNNER_TEMP/changed-files.txt"
           fi
 
+      - name: Validate merged stacked immunity provenance
+        id: stacked_memory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          SOURCE_PR_URL: ${{ github.server_url }}/${{ github.repository }}/pull/${{ github.event.pull_request.number || '' }}
+        run: |
+          echo "use_candidate_memory=false" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            exit 0
+          fi
+
+          mapfile -t CANDIDATE_MEMORY_FILES < <(
+            git -C candidate diff --name-only --no-renames \
+              "$BASE_SHA...$HEAD_SHA" -- immunities/v1 \
+              | LC_ALL=C sort -u
+          )
+          if [ "${#CANDIDATE_MEMORY_FILES[@]}" -eq 0 ]; then
+            exit 0
+          fi
+
+          SNAPSHOT=candidate/immunities/v1/snapshot.json
+          for directory in candidate/immunities candidate/immunities/v1; do
+            test -d "$directory"
+            test ! -L "$directory"
+          done
+          test -f "$SNAPSHOT"
+          test ! -L "$SNAPSHOT"
+          if find candidate/immunities/v1 ! -type d ! -type f -print -quit | grep -q .; then
+            echo "Candidate immunity storage contains a non-regular path." >&2
+            exit 1
+          fi
+          test "$(wc -c < "$SNAPSHOT")" -le 1048576
+
+          SOURCE_REVISION="$(jq -er '.source_revision' "$SNAPSHOT")"
+          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          REMEDIATION_BRANCH="antibody/pr-${PR_NUMBER}-${SOURCE_REVISION:0:12}"
+          jq -e \
+            --arg source_pr_url "$SOURCE_PR_URL" \
+            --arg remediation_branch "$REMEDIATION_BRANCH" \
+            --argjson source_pr_number "$PR_NUMBER" '
+              .lifecycle.state == "verified_pending_review" and
+              .lifecycle.evaluation_status == "BYPASS_CONFIRMED" and
+              .lifecycle.source_pr_number == $source_pr_number and
+              .lifecycle.source_pr_url == $source_pr_url and
+              .lifecycle.remediation_branch == $remediation_branch and
+              (.lifecycle.remediation_pr_url | type == "string") and
+              ([.lifecycle.memory_projections[].pending] | add) == 1
+            ' "$SNAPSHOT" >/dev/null
+
+          REMEDIATION_PR_URL="$(jq -r '.lifecycle.remediation_pr_url' "$SNAPSHOT")"
+          REMEDIATION_PR_NUMBER="${REMEDIATION_PR_URL##*/}"
+          [[ "$REMEDIATION_PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          test "$REMEDIATION_PR_URL" = \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$REMEDIATION_PR_NUMBER"
+
+          REMEDIATION_PR="$RUNNER_TEMP/remediation-pr.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$REMEDIATION_PR_NUMBER" \
+            > "$REMEDIATION_PR"
+          jq -e \
+            --arg url "$REMEDIATION_PR_URL" \
+            --arg branch "$REMEDIATION_BRANCH" \
+            --arg base_ref "$HEAD_REF" \
+            --arg repository "$GITHUB_REPOSITORY" '
+              .html_url == $url and
+              .state == "closed" and
+              .merged == true and
+              .head.ref == $branch and
+              .head.repo.full_name == $repository and
+              .base.ref == $base_ref and
+              .base.repo.full_name == $repository and
+              (.merge_commit_sha | type == "string")
+            ' "$REMEDIATION_PR" >/dev/null
+
+          MERGE_COMMIT_SHA="$(jq -r '.merge_commit_sha' "$REMEDIATION_PR")"
+          REMEDIATION_HEAD_SHA="$(jq -r '.head.sha' "$REMEDIATION_PR")"
+          [[ "$MERGE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REMEDIATION_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git -C candidate merge-base --is-ancestor "$SOURCE_REVISION" "$HEAD_SHA"
+          git -C candidate merge-base --is-ancestor "$MERGE_COMMIT_SHA" "$HEAD_SHA"
+
+          REMEDIATION_FILES="$RUNNER_TEMP/remediation-memory-files.txt"
+          : > "$REMEDIATION_FILES"
+          ARTIFACT_COUNT=0
+          SNAPSHOT_COUNT=0
+          while IFS=$'\t' read -r status path; do
+            if [ "$path" = "immunities/v1/snapshot.json" ]; then
+              [[ "$status" == "added" || "$status" == "modified" ]]
+              SNAPSHOT_COUNT=$((SNAPSHOT_COUNT + 1))
+            elif [[ "$path" =~ ^immunities/v1/[a-z][a-z0-9-]*/imm-[a-z][a-z0-9-]*-[0-9a-f]{20}\.yaml$ ]]; then
+              test "$status" = "added"
+              ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
+            else
+              echo "Remediation PR contains a non-immutable path: $path" >&2
+              exit 1
+            fi
+            printf '%s\n' "$path" >> "$REMEDIATION_FILES"
+          done < <(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/pulls/$REMEDIATION_PR_NUMBER/files?per_page=100" \
+              --jq '.[] | [.status, .filename] | @tsv'
+          )
+          test "$ARTIFACT_COUNT" -eq 1
+          test "$SNAPSHOT_COUNT" -eq 1
+          LC_ALL=C sort -u -o "$REMEDIATION_FILES" "$REMEDIATION_FILES"
+
+          CANDIDATE_FILES="$RUNNER_TEMP/candidate-memory-files.txt"
+          printf '%s\n' "${CANDIDATE_MEMORY_FILES[@]}" > "$CANDIDATE_FILES"
+          cmp -s "$REMEDIATION_FILES" "$CANDIDATE_FILES"
+          while IFS= read -r path; do
+            REMEDIATION_BLOB_SHA="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/contents/$path?ref=$REMEDIATION_HEAD_SHA" \
+                --jq '.sha'
+            )"
+            [[ "$REMEDIATION_BLOB_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$REMEDIATION_BLOB_SHA" = \
+              "$(git -C candidate rev-parse "$HEAD_SHA:$path")"
+          done < "$CANDIDATE_FILES"
+
+          echo "use_candidate_memory=true" >> "$GITHUB_OUTPUT"
+
       - name: Capture Base and Head ADK capability surfaces
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           TARGET: ${{ github.event.inputs.target || 'auto' }}
+          USE_CANDIDATE_MEMORY: ${{ steps.stacked_memory.outputs.use_candidate_memory }}
         run: |
           uv sync --project candidate --locked --dev
           uv sync --project base --locked --dev
+          MEMORY_ROOT=base
+          if [ "$USE_CANDIDATE_MEMORY" = "true" ]; then
+            uv run --project candidate --locked agent-antibody immunity audit \
+              --repository-root candidate \
+              --base-revision "$BASE_SHA" \
+              --head-revision "$HEAD_SHA"
+            uv run --project candidate --locked agent-antibody immunity verify \
+              --repository-root candidate
+            MEMORY_ROOT=candidate
+          fi
           mkdir -p "$RUNNER_TEMP/candidate-output/capabilities/base"
           mkdir -p "$RUNNER_TEMP/candidate-output/capabilities/head"
           mkdir -p "$RUNNER_TEMP/candidate-output/capability-deltas"
@@ -120,7 +258,7 @@ jobs:
             TARGET_ARGS+=(--target "$target")
           done < <(jq -r '.[]' "$RUNNER_TEMP/affected-targets.json")
           uv run --project candidate --locked agent-antibody immunity assess \
-            --memory-repository-root base \
+            --memory-repository-root "$MEMORY_ROOT" \
             --base-revision "$BASE_SHA" \
             --source-revision "$HEAD_SHA" \
             --capability-delta-dir "$RUNNER_TEMP/candidate-output/capability-deltas" \

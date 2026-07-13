@@ -216,10 +216,12 @@ Agent PR (read-only candidate workflow)
   -> Cloud Run live Gemini release gate
 ```
 
-`Agent Antibody Candidate` executes candidate code with only `contents: read`,
-no secrets, no cache, and no write token. It captures the declarations from Base
-and Head separately and reads active immunity from Base, so a candidate cannot
-hide an existing memory. The repository variable
+`Agent Antibody Candidate` executes candidate code with no secrets, no cache, and
+no write token. Its job token has only `contents: read` and `pull-requests: read`;
+the latter is exposed only to the shell step that validates merged remediation
+provenance, never to candidate code. It captures the declarations from Base and
+Head separately and reads active immunity from Base, so a candidate cannot hide
+an existing memory. The repository variable
 `AGENT_ANTIBODY_ALLOWED_PR_AUTHOR` must contain one exact GitHub login: an unset
 or non-matching value fails closed before candidate evaluation. The remediation
 workflow independently rechecks the PR author through the GitHub API, so a PR
@@ -236,6 +238,16 @@ writer restores only regular `immunities/v1/**` files into a clean checkout and
 opens a stacked draft PR. Fork and non-authorized PRs never receive evaluation
 credentials or an automatic write/PR. Existing memory is append-only; a rerun
 reuses the already-created remediation branch rather than overwriting it.
+
+When that stacked PR is merged into its source PR, candidate revalidation still
+starts from Base by default. It switches to the pending candidate memory only
+after GitHub confirms that the linked remediation PR was merged into that source
+branch. Its changed-file set and merged blobs must exactly match the candidate's
+immutable-memory delta before the append-only audit and strict regression
+verification run. The read-only GitHub token is scoped to this provenance step
+and is not exposed to candidate code. This turns reviewed `BYPASS_CONFIRMED`
+memory into `REVALIDATED` coverage without letting an arbitrary candidate
+artifact suppress a new-tool campaign.
 
 The `production` GitHub environment supplies two non-secret evaluator values:
 

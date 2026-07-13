@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -154,10 +155,56 @@ def test_only_the_allowlisted_pr_author_can_trigger_antibody_workflows() -> None
         assert "Source pull request author is not authorized" in script
 
 
+def test_candidate_revalidates_only_a_verified_stacked_memory_update() -> None:
+    candidate_jobs = _mapping(_workflow("antibody-candidate.yml")["jobs"])
+    candidate = _mapping(candidate_jobs["evaluate"])
+    provenance = _step(candidate, "Validate merged stacked immunity provenance")
+    provenance_env = _mapping(provenance["env"])
+    provenance_script = cast(str, provenance["run"])
+    capture = _step(candidate, "Capture Base and Head ADK capability surfaces")
+    capture_env = _mapping(capture["env"])
+    capture_script = cast(str, capture["run"])
+
+    assert provenance_env["GH_TOKEN"] == "${{ github.token }}"
+    assert "use_candidate_memory=false" in provenance_script
+    assert "git -C candidate diff --name-only --no-renames" in provenance_script
+    assert '.lifecycle.state == "verified_pending_review"' in provenance_script
+    assert '.lifecycle.evaluation_status == "BYPASS_CONFIRMED"' in provenance_script
+    assert ".merged == true" in provenance_script
+    assert ".head.ref == $branch" in provenance_script
+    assert ".base.ref == $base_ref" in provenance_script
+    assert 'merge-base --is-ancestor "$SOURCE_REVISION" "$HEAD_SHA"' in provenance_script
+    assert 'merge-base --is-ancestor "$MERGE_COMMIT_SHA" "$HEAD_SHA"' in provenance_script
+    assert 'cmp -s "$REMEDIATION_FILES" "$CANDIDATE_FILES"' in provenance_script
+    assert "contents/$path?ref=$REMEDIATION_HEAD_SHA" in provenance_script
+    assert 'rev-parse "$HEAD_SHA:$path"' in provenance_script
+    assert "use_candidate_memory=true" in provenance_script
+    subprocess.run(
+        ("bash", "-n"),
+        input=provenance_script,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "GH_TOKEN" not in capture_env
+    assert capture_env["USE_CANDIDATE_MEMORY"] == (
+        "${{ steps.stacked_memory.outputs.use_candidate_memory }}"
+    )
+    assert "MEMORY_ROOT=base" in capture_script
+    assert "immunity audit" in capture_script
+    assert "immunity verify" in capture_script
+    assert "MEMORY_ROOT=candidate" in capture_script
+    assert '--memory-repository-root "$MEMORY_ROOT"' in capture_script
+
+
 def test_candidate_workflow_never_receives_oidc_or_write_permissions() -> None:
     candidate = _workflow("antibody-candidate.yml")
 
-    assert _mapping(candidate["permissions"]) == {"contents": "read"}
+    assert _mapping(candidate["permissions"]) == {
+        "contents": "read",
+        "pull-requests": "read",
+    }
     text = (_ROOT / ".github" / "workflows" / "antibody-candidate.yml").read_text()
     assert "id-token: write" not in text
     assert "contents: write" not in text
