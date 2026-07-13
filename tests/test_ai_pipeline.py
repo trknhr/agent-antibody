@@ -667,6 +667,37 @@ class MissesFirstProtectedReplay:
         return ReplayOpsMateTarget().run(case, tools)
 
 
+class NoopsOnNormalUtility:
+    """Simulate a transient model no-op without touching a tool or state."""
+
+    def __init__(self, *, persistent: bool = False, touch_read_tool: bool = False) -> None:
+        self.normal_attempts = 0
+        self._persistent = persistent
+        self._touch_read_tool = touch_read_tool
+
+    def run(self, case: ExecutionCase, tools: ToolInvoker) -> AgentRunResult:
+        if case.attack:
+            return ReplayOpsMateTarget().run(case, tools)
+        self.normal_attempts += 1
+        if self._persistent or self.normal_attempts == 1:
+            if self._touch_read_tool:
+                result = tools.call(
+                    "get_service_status",
+                    {"service": str(case.fixtures["service"])},
+                )
+                return AgentRunResult(
+                    success=False,
+                    reply="incomplete normal utility run",
+                    tool_results=(result,),
+                )
+            return AgentRunResult(
+                success=False,
+                reply="model_api_error:429:RESOURCE_EXHAUSTED",
+                tool_results=(),
+            )
+        return ReplayOpsMateTarget().run(case, tools)
+
+
 def test_live_pipeline_rejects_a_campaign_without_ten_confirmed_infections() -> None:
     with pytest.raises(LivePipelineError, match="all ten"):
         LiveSecurityPipeline(
@@ -727,11 +758,64 @@ def test_live_pipeline_stops_after_bounded_protected_replay() -> None:
     assert target.attempts[failed[0].protected.case.case_id] == 3
 
 
+def test_live_pipeline_retries_a_normal_model_noop_once() -> None:
+    target = NoopsOnNormalUtility()
+
+    report = LiveSecurityPipeline(
+        model="scripted",
+        target_id="opsmate",
+        attack_agent=FixedAttackPlanner(_attack_plan()),
+        antibody_agent=EvidenceBoundAntibodyPlanner(),
+        target_agent_factory=lambda: target,
+        normal_replay_attempts=2,
+    ).run()
+
+    assert report.acceptance_passed
+    assert report.normal.oracle.status == OracleStatus.HEALTHY
+    assert target.normal_attempts == 2
+
+
+def test_live_pipeline_stops_after_bounded_normal_noop_replay() -> None:
+    target = NoopsOnNormalUtility(persistent=True)
+
+    report = LiveSecurityPipeline(
+        model="scripted",
+        target_id="opsmate",
+        attack_agent=FixedAttackPlanner(_attack_plan()),
+        antibody_agent=EvidenceBoundAntibodyPlanner(),
+        target_agent_factory=lambda: target,
+        normal_replay_attempts=2,
+    ).run()
+
+    assert not report.acceptance_passed
+    assert report.normal.oracle.status == OracleStatus.UNHEALTHY
+    assert target.normal_attempts == 2
+
+
+def test_live_pipeline_does_not_retry_normal_after_any_tool_request() -> None:
+    target = NoopsOnNormalUtility(persistent=True, touch_read_tool=True)
+
+    report = LiveSecurityPipeline(
+        model="scripted",
+        target_id="opsmate",
+        attack_agent=FixedAttackPlanner(_attack_plan()),
+        antibody_agent=EvidenceBoundAntibodyPlanner(),
+        target_agent_factory=lambda: target,
+        normal_replay_attempts=2,
+    ).run()
+
+    assert not report.acceptance_passed
+    assert report.normal.oracle.status == OracleStatus.UNHEALTHY
+    assert target.normal_attempts == 1
+
+
 def test_live_pipeline_requires_campaign_parallelism_within_timeout_budget() -> None:
     with pytest.raises(ValueError, match="between three and 10"):
         LiveSecurityPipeline(model="scripted", suite_concurrency=2)
     with pytest.raises(ValueError, match="protected_replay_attempts"):
         LiveSecurityPipeline(model="scripted", protected_replay_attempts=3)
+    with pytest.raises(ValueError, match="normal_replay_attempts"):
+        LiveSecurityPipeline(model="scripted", normal_replay_attempts=3)
 
 
 class SafeAgent:

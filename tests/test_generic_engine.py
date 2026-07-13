@@ -697,3 +697,9 @@ def test_case_run_exports_target_neutral_structured_trace(
     assert records
     assert {record["target_id"] for record in records} == {"recordmate"}
     assert {record["case_id"] for record in records} == {run.case.case_id}
+    completed = next(record for record in records if record["event_type"] == "run.completed")
+    assert completed["details"] == {
+        "agent_success": True,
+        "normal_task_succeeded": True,
+        "oracle_status": "HEALTHY",
+    }
