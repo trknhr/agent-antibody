@@ -32,6 +32,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          ALLOWED_PR_AUTHOR: ${{ vars.AGENT_ANTIBODY_ALLOWED_PR_AUTHOR }}
         run: |
           PR_NUMBER="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
           if [ -z "$PR_NUMBER" ]; then
@@ -39,10 +40,16 @@ jobs:
             exit 0
           fi
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/source-pr.json"
+          PR_AUTHOR="$(jq -r '.user.login // empty' "$RUNNER_TEMP/source-pr.json")"
           HEAD_SHA="$(jq -r '.head.sha' "$RUNNER_TEMP/source-pr.json")"
           HEAD_REF="$(jq -r '.head.ref' "$RUNNER_TEMP/source-pr.json")"
           HEAD_REPOSITORY="$(jq -r '.head.repo.full_name // empty' "$RUNNER_TEMP/source-pr.json")"
           BASE_SHA="$(jq -r '.base.sha' "$RUNNER_TEMP/source-pr.json")"
+          if [ -z "$ALLOWED_PR_AUTHOR" ] || [ "$PR_AUTHOR" != "$ALLOWED_PR_AUTHOR" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Source pull request author is not authorized for Agent Antibody."
+            exit 0
+          fi
           if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_SHA" != "$WORKFLOW_HEAD_SHA" ]; then
             echo "eligible=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -277,6 +284,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          ALLOWED_PR_AUTHOR: ${{ vars.AGENT_ANTIBODY_ALLOWED_PR_AUTHOR }}
         run: |
           PR_NUMBER="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
           if [ -z "$PR_NUMBER" ]; then
@@ -284,10 +292,16 @@ jobs:
             exit 0
           fi
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/source-pr.json"
+          PR_AUTHOR="$(jq -r '.user.login // empty' "$RUNNER_TEMP/source-pr.json")"
           HEAD_SHA="$(jq -r '.head.sha' "$RUNNER_TEMP/source-pr.json")"
           HEAD_REF="$(jq -r '.head.ref' "$RUNNER_TEMP/source-pr.json")"
           HEAD_REPOSITORY="$(jq -r '.head.repo.full_name // empty' "$RUNNER_TEMP/source-pr.json")"
           BASE_SHA="$(jq -r '.base.sha' "$RUNNER_TEMP/source-pr.json")"
+          if [ -z "$ALLOWED_PR_AUTHOR" ] || [ "$PR_AUTHOR" != "$ALLOWED_PR_AUTHOR" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Source pull request author is not authorized for Agent Antibody."
+            exit 0
+          fi
           if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ] || [ "$HEAD_SHA" != "$WORKFLOW_HEAD_SHA" ]; then
             echo "eligible=false" >> "$GITHUB_OUTPUT"
             exit 0
