@@ -219,16 +219,23 @@ Agent PR (read-only candidate workflow)
 `Agent Antibody Candidate` executes candidate code with only `contents: read`,
 no secrets, no cache, and no write token. It captures the declarations from Base
 and Head separately and reads active immunity from Base, so a candidate cannot
-hide an existing memory. When exactly one observed ADK tool needs new attack
-coverage, `Agent Antibody Remediate` uses a workflow-pinned WIF provider and a
-dedicated Vertex-only service account to run the bounded Gemini delta campaign.
-That job has `contents: read` and no pull-request permission. Its data-only
-result is handed to a fresh job with no OIDC permission; only that second job
-runs trusted default-branch control-plane code, merges the assessment, writes
-additive `immunities/v1/**` files, and opens a stacked draft PR. Fork PRs never
-receive evaluation credentials or an automatic write/PR. Existing memory is
-append-only; a rerun reuses the already-created remediation branch rather than
-overwriting it.
+hide an existing memory. The repository variable
+`AGENT_ANTIBODY_ALLOWED_PR_AUTHOR` must contain one exact GitHub login: an unset
+or non-matching value fails closed before candidate evaluation. The remediation
+workflow independently rechecks the PR author through the GitHub API, so a PR
+cannot grant itself Gemini, WIF, or write authority by modifying its workflow.
+
+When exactly one observed ADK tool needs new attack coverage,
+`Agent Antibody Remediate` uses a workflow-pinned WIF provider and a dedicated
+Vertex-only service account to run the bounded Gemini delta campaign. That job
+has `contents: read` and no pull-request permission. Its data-only result is
+handed to a fresh job with no OIDC permission. The source runtime generates and
+verifies immutable memory only without credential or workflow-command channels;
+that checkout is discarded before the GitHub writer token is introduced. The
+writer restores only regular `immunities/v1/**` files into a clean checkout and
+opens a stacked draft PR. Fork and non-authorized PRs never receive evaluation
+credentials or an automatic write/PR. Existing memory is append-only; a rerun
+reuses the already-created remediation branch rather than overwriting it.
 
 The `production` GitHub environment supplies two non-secret evaluator values:
 
